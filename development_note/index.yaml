@@ -1,0 +1,16 @@
+# development_note/index.yaml
+last_updated: "2026-10-08"
+modules:
+  - name: depth-estimation
+    path: modules/depth-estimation/timeline.md
+    description: "Model survey/choice (DA2, MoGe-2, DA3), ONNX Runtime inference, MoGe focal/shift port"
+  - name: reconstruction
+    path: modules/reconstruction/timeline.md
+    description: "Depth mapping, perspective unprojection, relief, stretched-face angle test (core/, NumPy only)"
+  - name: blender-addon
+    path: modules/blender-addon/timeline.md
+    description: "Extension packaging, preferences (ORT install, downloads), live properties, cameras, UI, bpy tests"
+standalone:
+  - name: architecture
+    path: architecture.md
+    description: "Three-stage pipeline, package layout, data flow, key decisions"

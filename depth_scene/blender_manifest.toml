@@ -1,0 +1,22 @@
+schema_version = "1.0.0"
+
+id = "depth_scene"
+version = "0.1.0"
+name = "Depth Scene"
+tagline = "Turn one image into a 3D scene with AI depth"
+maintainer = "saranunt-0"
+type = "add-on"
+website = "https://github.com/saranunt-0/2D-to-3D-TrueDepth"
+tags = ["3D View", "Camera", "Mesh"]
+
+blender_version_min = "4.2.0"
+
+# Blender add-ons link against Blender's GPL code.
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Download depth models and install ONNX Runtime"
+files = "Read images, write depth maps and models"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

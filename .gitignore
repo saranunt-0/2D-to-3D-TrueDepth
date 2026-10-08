@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv*/
+dist/
+.pytest_cache/
+# local test material (e.g. third-party artwork) - not for the repo
+test_images/
+demo_out/
