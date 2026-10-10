@@ -337,3 +337,33 @@ def test_download_class_with_file_url(tmp_path):
     bad = download.Download((tmp_path / "missing.bin").as_uri(), str(tmp_path / "x.onnx"))
     bad.run()
     assert bad.error and not os.path.exists(tmp_path / "x.onnx")
+
+
+def test_illustrators_depth_generation_and_layered_relief(addon):
+    from depth_scene import paths
+    from depth_scene.ai import models
+    from fake_models import make_illustrators_depth_like
+
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("onnx")
+    make_illustrators_depth_like(paths.model_path(models.get("illustrators_depth"), "fp32"))
+    s = bpy.context.scene.depth_scene
+    s.image = addon["image"]
+    s.use_existing_depth = False
+    s.model = "illustrators_depth"
+    s.precision = "fp32"
+    s.device = "CPU"
+    s.input_blur = 1.0
+    s.mode = "RELIEF"
+    # the panel takes the manual-model branch without errors
+    from depth_scene import ui
+    ui.DEPTHSCENE_PT_main.draw(type("P", (), {"layout": _Layout()})(), bpy.context)
+    assert bpy.ops.depth_scene.build() == {"FINISHED"}
+    obj = bpy.context.active_object
+    o = obj.depth_scene
+    assert o.depth_kind == "layers" and o.mapping == "LINEAR"
+    o.layer_steps = 6
+    co = np.empty(len(obj.data.vertices) * 3, np.float32)
+    obj.data.vertices.foreach_get("co", co)
+    assert len(set(np.round(co.reshape(-1, 3)[:, 2], 4))) <= 6
+    s.model = "da2_small"

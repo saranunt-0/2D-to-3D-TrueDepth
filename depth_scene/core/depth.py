@@ -10,6 +10,10 @@ Depth models output one of three kinds of map:
     "White = far" depth maps exported from other tools.
 ``metric``
     Absolute planar depth in metres (MoGe-2, metric models).
+``layers``
+    Illustrator's depth: a per-pixel *layer index* (bigger = drawn on top),
+    i.e. an ordering, not a distance. Equal index steps are equal depth
+    steps, so the natural mapping is LINEAR.
 
 Everything is first converted to a normalised *nearness* ``t`` in [0, 1]
 (1 = nearest pixel, 0 = farthest), then mapped to distances with one of the
@@ -27,7 +31,7 @@ import numpy as np
 
 from . import imaging
 
-KINDS = ("disparity", "depth", "metric")
+KINDS = ("disparity", "depth", "metric", "layers")
 MAPPINGS = ("INVERSE", "LINEAR", "METRIC")
 
 
@@ -54,7 +58,7 @@ def normalize(values, mask=None):
 def nearness(depth_map, kind, mask=None):
     """Convert a raw depth map to normalised nearness (1 = near, 0 = far)."""
     depth_map = np.asarray(depth_map, dtype=np.float32)
-    if kind == "disparity":
+    if kind in ("disparity", "layers"):
         return normalize(depth_map, mask)
     if kind == "depth":
         return 1.0 - normalize(depth_map, mask)
@@ -67,7 +71,30 @@ def nearness(depth_map, kind, mask=None):
 
 
 def default_mapping(kind):
-    return {"disparity": "INVERSE", "depth": "LINEAR", "metric": "METRIC"}[kind]
+    return {"disparity": "INVERSE", "depth": "LINEAR", "metric": "METRIC", "layers": "LINEAR"}[kind]
+
+
+def quantize(t, steps):
+    """Snap nearness to ``steps`` evenly spaced levels (0/1 = off).
+
+    Gives the flat, stacked "paper cut-out / diorama" look; with layer-index
+    maps each level is one illustration layer.
+    """
+    steps = int(steps)
+    if steps < 2:
+        return t
+    t = np.clip(np.asarray(t, dtype=np.float32), 0.0, 1.0)
+    return (np.round(t * (steps - 1)) / (steps - 1)).astype(np.float32)
+
+
+def robust_clip(values, low_pct=0.5, high_pct=99.5):
+    """Clip outliers to the given percentiles of the finite values."""
+    values = np.asarray(values, dtype=np.float32)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return values
+    lo, hi = np.percentile(finite, [low_pct, high_pct])
+    return np.clip(values, lo, hi).astype(np.float32)
 
 
 def map_to_distance(t, mapping, near, far):

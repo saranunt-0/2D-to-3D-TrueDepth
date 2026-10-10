@@ -9,6 +9,7 @@ from mathutils import Vector
 
 from . import bimage, paths
 from .ai import infer, models
+from .core import depth as depth_mod
 from .core import geometry, imaging
 
 RIG_ROTATION = (math.pi / 2, 0.0, 0.0)   # camera space (-Z forward) -> world (+Y forward, +Z up)
@@ -17,7 +18,7 @@ RIG_ROTATION = (math.pi / 2, 0.0, 0.0)   # camera space (-Z forward) -> world (+
 # ----------------------------------------------------------------------------- depth
 
 def depth_signature(s, image):
-    return f"{image.name_full}|{s.model}|{s.custom_model_path}|{s.precision}|{s.input_size}"
+    return f"{image.name_full}|{s.model}|{s.custom_model_path}|{s.precision}|{s.input_size}|{s.input_blur}"
 
 
 def generate_depth(scene_settings, image):
@@ -30,10 +31,12 @@ def generate_depth(scene_settings, image):
         info = models.get(s.model)
         model_file = paths.model_path(info, s.precision)
     if not model_file or not os.path.exists(model_file):
-        raise RuntimeError(f"Model file not found: {model_file or '(none)'} - download it in the add-on preferences")
+        hint = info.manual or "download it in the add-on preferences"
+        raise RuntimeError(f"Model file not found: {model_file or '(none)'} - {hint}")
 
     rgb = bimage.display_rgb(image)
-    result = infer.estimate(info, model_file, rgb, device=s.device, input_size=s.input_size)
+    result = infer.estimate(info, model_file, rgb, device=s.device, input_size=s.input_size,
+                            input_blur=s.input_blur)
     folder = bimage.output_dir(s.save_location)
     name = f"{os.path.splitext(image.name)[0]}_depth"
     depth_img = bimage.write_depth(name, result.depth, result.valid, folder)
@@ -55,6 +58,8 @@ def suggest_near_far(depth, kind, valid):
         lo = max(float(np.percentile(vals, 0.5)), hi / 100.0, 1e-6)
         ratio = float(np.clip(hi / lo, 1.5, 100.0))
         return 1.0, ratio
+    if kind == "layers":
+        return 1.0, 2.0       # shallow stack of layers; widen Far to separate them
     return 1.0, 10.0
 
 
@@ -67,6 +72,7 @@ def _params(o):
         stretch_angle=o.stretch_angle, size=o.size, base_displacement=o.base_displacement,
         invert=o.invert, smooth=o.smooth, detail_strength=o.detail_strength,
         detail_radius=o.detail_radius, use_alpha=o.use_alpha, remove_masked=o.remove_masked,
+        layer_steps=o.layer_steps,
     )
 
 
@@ -278,7 +284,7 @@ def build_scene(context, image, depth_img, kind, mode, est_fov=None):
     depth, valid = bimage.depth_arrays(depth_img)
     near, far = suggest_near_far(depth, kind, valid)
     o.near, o.far = near, far
-    o.mapping = "METRIC" if kind == "metric" else ("LINEAR" if kind == "depth" else "INVERSE")
+    o.mapping = depth_mod.default_mapping(kind)
     o.shading = "EMISSION" if mode == "PERSPECTIVE" else "PRINCIPLED"
     o.use_alpha = bimage.has_alpha(image)
     if mode == "RELIEF":

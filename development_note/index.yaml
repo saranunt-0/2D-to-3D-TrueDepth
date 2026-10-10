@@ -1,9 +1,9 @@
 # development_note/index.yaml
-last_updated: "2026-10-08"
+last_updated: "2026-10-10"
 modules:
   - name: depth-estimation
     path: modules/depth-estimation/timeline.md
-    description: "Model survey/choice (DA2, MoGe-2, DA3), ONNX Runtime inference, MoGe focal/shift port"
+    description: "Model survey/choice (DA2, MoGe-2, DA3), ONNX Runtime inference, MoGe focal/shift port, Illustrator's Depth (manual ONNX)"
   - name: reconstruction
     path: modules/reconstruction/timeline.md
     description: "Depth mapping, perspective unprojection, relief, stretched-face angle test (core/, NumPy only)"

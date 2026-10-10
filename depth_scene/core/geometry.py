@@ -133,6 +133,7 @@ class MeshParams:
         self.smooth = kw.pop("smooth", 0.0)                 # % of longer side
         self.detail_strength = kw.pop("detail_strength", 0.0)
         self.detail_radius = kw.pop("detail_radius", 1.0)   # % of longer side
+        self.layer_steps = kw.pop("layer_steps", 0)         # 0 = continuous
         self.use_alpha = kw.pop("use_alpha", False)
         self.remove_masked = kw.pop("remove_masked", False)
         if kw:
@@ -143,7 +144,7 @@ def build(params, depth_map, depth_kind, image_size, gray=None, alpha=None, vali
     """Build mesh arrays.
 
     depth_map   (h, w) raw model output (any resolution).
-    depth_kind  'disparity' | 'depth' | 'metric'.
+    depth_kind  'disparity' | 'depth' | 'metric' | 'layers'.
     image_size  (width_px, height_px) of the colour image; sets aspect + FOV.
     gray        optional (H, W) luminance for detail displacement.
     alpha       optional (H, W) image alpha (faces below 0.5 are removed).
@@ -174,7 +175,7 @@ def build(params, depth_map, depth_kind, image_size, gray=None, alpha=None, vali
             t_map[~valid] = 0.0   # invalid (sky) goes to the far plane
         if smooth_px > 0:
             t_map = imaging.gaussian_blur(t_map, smooth_px)
-        t = imaging.sample_bilinear(t_map, u, v)
+        t = depth_mod.quantize(imaging.sample_bilinear(t_map, u, v), params.layer_steps)
         z = None
         if params.mode == "PERSPECTIVE":
             z = depth_mod.map_to_distance(t, params.mapping, params.near, params.far)

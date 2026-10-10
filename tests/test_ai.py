@@ -22,6 +22,9 @@ def test_registry_licences_are_flagged():
         assert not models.MODELS[key].commercial_ok
         assert models.MODELS[key].license_id == "CC-BY-NC-4.0"
     for m in models.MODELS.values():
+        if m.url("fp32") is None:            # manual conversion (Illustrator's Depth)
+            assert m.manual and not m.commercial_ok
+            continue
         assert m.url("fp32").startswith("https://huggingface.co/")
         assert m.url("fp16")  # falls back to fp32 when no fp16 file exists
 
@@ -67,3 +70,23 @@ def test_gpu_request_without_gpu_provider_is_explicit():
     with pytest.raises(RuntimeError, match="No GPU execution provider"):
         runtime.choose_providers("GPU")
     assert runtime.choose_providers("AUTO") == ["CPUExecutionProvider"]
+
+
+def test_illustrators_depth_signature_and_postprocess(tmp_path):
+    from fake_models import make_illustrators_depth_like
+
+    info = models.get("illustrators_depth")
+    assert not info.commercial_ok and info.url("fp32") is None and info.manual
+    path = str(tmp_path / "illustrators_depth_fp32.onnx")
+    make_illustrators_depth_like(path)
+    rgb = np.zeros((300, 600, 3), np.float32)
+    rgb[:, 300:] = 1.0                                   # right half "on top"
+    res = infer.estimate(info, path, rgb, device="CPU", input_size=518, input_blur=1.5)
+    assert res.kind == "layers"
+    h, w = res.depth.shape
+    assert (h, w) == (768, 1536)                         # aspect restored, long side 1536
+    # input normalised to [-1, 1]: black -> -1, white -> +1
+    assert res.depth[h // 2, 10] == pytest.approx(-1.0, abs=0.02)
+    assert res.depth[h // 2, -10] == pytest.approx(1.0, abs=0.02)
+    # the planted -1e4 clamp outlier is clipped away
+    assert res.depth.min() > -1.5

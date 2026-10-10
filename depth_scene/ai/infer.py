@@ -9,6 +9,7 @@ import time
 
 import numpy as np
 
+from ..core import depth as depth_mod
 from ..core import imaging, moge_post
 from . import runtime
 
@@ -85,13 +86,45 @@ def moge2(sess, rgb, input_size=518):
     return DepthResult(depth, "metric", valid=valid, fov=fov)
 
 
-FAMILIES = {"depth_anything_v2": depth_anything_v2, "moge2": moge2}
+ILLUSTRATORS_DEPTH_SIZE = 1536   # Depth Pro's encoder is hard-wired to 1536x1536
 
 
-def estimate(model_info, model_path, rgb, device="AUTO", input_size=518):
+def illustrators_depth(sess, rgb, input_size=None, input_blur=0.0):
+    """Illustrator's Depth (Depth Pro backbone): layer index, bigger = on top.
+
+    Mirrors the authors' ``custom_transforms``: plain (aspect-ignoring)
+    resize to 1536x1536, Normalize(mean=0.5, std=0.5). ``input_blur`` is
+    their ``gaussian_sigma`` (in 1536-px units), suggested for canvas/paper
+    textures. ``input_size`` is ignored - the backbone size is fixed.
+    The head's -1/clamp(...) output can hit the clamp limits, so outliers
+    are clipped before the map is stored.
+    """
+    h, w = rgb.shape[:2]
+    size = ILLUSTRATORS_DEPTH_SIZE
+    x = imaging.resize(rgb[..., :3], size, size)
+    if input_blur > 0:
+        x = imaging.gaussian_blur(x, input_blur)
+    x = (x - 0.5) / 0.5
+    x = x.transpose(2, 0, 1)[None].astype(_input_dtype(sess))
+    out = sess.run(None, {sess.get_inputs()[0].name: x})[0]
+    layers = np.asarray(out, dtype=np.float32).reshape(out.shape[-2], out.shape[-1])
+    layers = depth_mod.robust_clip(layers)
+    # Back to the image's aspect ratio, longer side = 1536.
+    scale = size / max(h, w)
+    layers = imaging.resize(layers, max(2, round(h * scale)), max(2, round(w * scale)))
+    return DepthResult(layers, "layers")
+
+
+FAMILIES = {"depth_anything_v2": depth_anything_v2, "moge2": moge2, "illustrators_depth": illustrators_depth}
+
+
+def estimate(model_info, model_path, rgb, device="AUTO", input_size=518, input_blur=0.0):
     sess = runtime.get_session(model_path, device)
     t0 = time.perf_counter()
-    result = FAMILIES[model_info.family](sess, rgb, input_size=input_size)
+    if model_info.family == "illustrators_depth":
+        result = illustrators_depth(sess, rgb, input_blur=input_blur)
+    else:
+        result = FAMILIES[model_info.family](sess, rgb, input_size=input_size)
     result.seconds = time.perf_counter() - t0
     result.provider = sess.get_providers()[0]
     return result

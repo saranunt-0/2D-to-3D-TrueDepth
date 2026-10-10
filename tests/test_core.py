@@ -203,3 +203,36 @@ def test_moge_focal_shift_recovery(fov_deg, size):
     assert valid.all()
     assert math.degrees(fov_long) == pytest.approx(fov_deg, abs=0.2)
     assert np.allclose(rec_depth, depth, rtol=5e-3)
+
+
+# ---------------------------------------------------------------- layer index (Illustrator's Depth)
+
+def test_layers_kind_is_front_high_and_linear():
+    layers = np.array([[0.0, 1.0], [2.0, 3.0]], np.float32)      # 3 = top layer
+    t = dm.nearness(layers, "layers")
+    assert t[1, 1] == pytest.approx(1.0) and t[0, 0] == pytest.approx(0.0)
+    assert dm.default_mapping("layers") == "LINEAR"
+    z = dm.map_to_distance(t, "LINEAR", near=1.0, far=4.0)
+    assert np.allclose(np.diff(np.sort(z.ravel())), 1.0)          # equal steps per layer
+
+
+def test_quantize_levels_and_off():
+    t = np.linspace(0, 1, 101, dtype=np.float32)
+    q = dm.quantize(t, 5)
+    assert sorted(set(np.round(q, 6))) == [0.0, 0.25, 0.5, 0.75, 1.0]
+    assert np.array_equal(dm.quantize(t, 0), t) and np.array_equal(dm.quantize(t, 1), t)
+
+
+def test_robust_clip_removes_clamp_outliers():
+    v = np.linspace(-2, -1, 10000, dtype=np.float32)
+    v[0] = -1e4
+    c = dm.robust_clip(v)
+    assert c.min() > -2.01 and c.max() == pytest.approx(-1.0, abs=0.01)
+
+
+def test_quantized_relief_gives_flat_layers():
+    ramp = np.tile(np.linspace(0, 7, 64, dtype=np.float32), (48, 1))
+    p = geo.MeshParams(mode="RELIEF", resolution=64, base_displacement=1.0, layer_steps=4)
+    verts, _, _, _ = geo.build(p, ramp, "layers", (64, 48))
+    levels = sorted(set(np.round(verts[:, 2], 5)))
+    assert levels == pytest.approx([0.0, 1 / 3, 2 / 3, 1.0], abs=1e-5)

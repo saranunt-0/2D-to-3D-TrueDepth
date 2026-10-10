@@ -83,6 +83,9 @@ the way TrueDepth does:
 | **Linear**  | z = t·near + (1−t)·far | "white = far" depth maps |
 | **Metric**  | z = model depth × scale | MoGe-2 or metric EXRs |
 
+Layer-index maps from *Illustrator's Depth* use **Linear**: equal layer
+steps become equal depth steps.
+
 With *Inverse*, the **far/near ratio stands in for the unknown shift**. Only
 one ratio makes the corridor walls perfectly straight. The add-on starts
 from a "zero shift" guess (`far/near = max/min disparity`). If walls bow
@@ -101,11 +104,52 @@ The full comparison and sources are in [docs/RESEARCH.md](docs/RESEARCH.md).
 | **MoGe-2 ViT-S** | 35 M | ~141 MB | MIT ✅ | metric depth **+ estimated FOV** | **corridors / perspective mode** |
 | Depth Anything V2 Base / Large | 97.5 M / 335 M | 390 MB / 1.34 GB | CC-BY-NC-4.0 ⚠️ | relative inverse depth | more detail, **non-commercial only** |
 | MoGe-2 ViT-B | 104 M | ~420 MB | MIT ✅ | metric + FOV | better geometry, slower |
+| Illustrator's Depth *(optional, manual)* | ~640 M (Depth Pro) | ~2.5 GB, you convert it | **Adobe Research: non-commercial research only** ⛔ | **layer index** (front-to-back order) | flat digital art / illustrations → layered relief or paper cut-out diorama |
 
 Recommendation for corridor shots: use **MoGe-2 ViT-S** in Perspective mode,
 because it sets the FOV and gives straight walls without tuning. Use
 **Depth Anything V2 Small** when you want the fastest, crispest depth map or
 are working in relief mode.
+
+---
+
+### Illustrator's Depth (optional, research use only)
+
+[Illustrator's Depth](https://github.com/nissmar/illustrators_depth)
+(Maruani et al., CVPR 2026, Inria + Adobe) does not predict distance. It
+predicts a **layer index** per pixel: the order an artist would stack the
+shapes in. That suits flat, graphic images (posters, vector-style
+environment art, cel-shaded scenes) better than photo-trained depth models.
+Paired with **Flat Relief** and **Quantize Layers**, it gives a stacked
+"paper cut-out" relief. Paired with **Perspective** and **Remove Stretched
+Faces**, it gives a cardboard-diorama parallax.
+
+Things to know before you use it:
+
+* **Licence.** Code and weights are under the *Adobe Research License*:
+  noncommercial research purposes only (academic research and teaching). It
+  explicitly excludes developing commercial products. The add-on only
+  *loads* a file you convert yourself; none of Adobe's code or weights is
+  in this repo. Whether *your* use qualifies is your call.
+* **Size.** It is built on Apple Depth Pro: ~640 M parameters with a fixed
+  1536×1536 input and ~2.5 GB of weights. Expect seconds on a GPU and tens
+  of seconds or more on a CPU. It is not a "lightweight" model.
+* **Conversion (one time).** The authors ship a PyTorch checkpoint (via
+  Google Drive), so convert it to ONNX in *their* environment:
+
+  ```bash
+  git clone --recursive https://github.com/nissmar/illustrators_depth.git
+  cd illustrators_depth
+  # set up their conda env and download the checkpoint exactly as their README says
+  pip install onnx onnxruntime onnxconverter-common
+  python /path/to/2D-to-3D-TrueDepth/tools/export_illustrators_depth_onnx.py \
+      --ckpt checkpoints/mmsvg_model/checkpoints/id_model.ckpt --check --fp16
+  ```
+
+  Copy `illustrators_depth_fp32.onnx` **and** `illustrators_depth_fp32.onnx.data`
+  (and/or the `fp16` pair) into the add-on's models folder. Then pick
+  *Illustrator's Depth* as the model. **Input Blur** is the authors'
+  `gaussian_sigma`; raise it to 1–2 for canvas or paper texture.
 
 ---
 
@@ -186,6 +230,8 @@ Requires **Blender 4.2 LTS or newer**. Tested with Blender 4.2.23 LTS and
 | Detail Displacement + Radius | Detail Displacement | Real geometry from image-luminance high-pass (brush strokes, bark) |
 | Bump | Bump / Detail Bump | Shader-only detail (Principled shading) |
 | Smooth | Smooth | Blurs the depth map before meshing |
+| Quantize Layers | — | Snaps depth to N flat layers (paper cut-out / diorama); 0 = off |
+| Input Blur | — | Illustrator's Depth only: pre-blur the input (canvas/paper texture) |
 | Use Alpha Channel | Include Alpha Channel | Deletes transparent areas (PNG cut-outs) |
 | Remove Sky / Invalid | — | Deletes pixels MoGe flags as invalid (sky) |
 | Projector / Shot camera | Projector / Shot Camera | 2.5D camera projection |
@@ -243,6 +289,8 @@ python -m pytest tests/
 Add-on code: GPL-3.0-or-later, as required for Blender add-ons and declared
 in `blender_manifest.toml`. Model weights are downloaded from their authors
 and keep their own licences: DA2-Small Apache-2.0, DA2-Base/Large
-CC-BY-NC-4.0, MoGe-2 MIT. The MoGe focal/shift recovery in
+CC-BY-NC-4.0, MoGe-2 MIT, Illustrator's Depth *Adobe Research License
+(noncommercial research only)*, which you convert yourself; nothing from it
+ships here. The MoGe focal/shift recovery in
 `core/moge_post.py` is a NumPy port of MIT-licensed code from
 [microsoft/MoGe](https://github.com/microsoft/MoGe).

@@ -46,14 +46,25 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
                     box.label(text=f"{info.license_id}: non-commercial use only", icon="ERROR")
                 path = paths.model_path(info, s.precision)
                 if not os.path.exists(path):
-                    row = box.row()
-                    row.alert = True
-                    op = row.operator("depth_scene.download_model", text=f"Download (~{info.size_mb(s.precision)} MB)", icon="URL")
-                    op.model, op.precision = info.key, s.precision if s.precision in info.files else "fp32"
+                    if info.url(s.precision) is None:
+                        col = box.column(align=True)
+                        col.alert = True
+                        col.label(text=f"Needs {info.filename(s.precision)} in the models folder", icon="ERROR")
+                        col.label(text="Convert with tools/export_illustrators_depth_onnx.py")
+                    else:
+                        row = box.row()
+                        row.alert = True
+                        op = row.operator("depth_scene.download_model",
+                                          text=f"Download (~{info.size_mb(s.precision)} MB)", icon="URL")
+                        op.model, op.precision = info.key, s.precision if s.precision in info.files else "fp32"
             row = box.row(align=True)
             row.prop(s, "device", text="")
             row.prop(s, "precision", text="")
-            box.prop(s, "input_size")
+            if s.model == "illustrators_depth":
+                box.prop(s, "input_blur")
+                box.label(text="Fixed 1536 px input; best with Flat Relief + Quantize Layers", icon="INFO")
+            else:
+                box.prop(s, "input_size")
             box.prop(s, "save_location")
             if runtime.import_ort() is None:
                 box.label(text="Install ONNX Runtime in Preferences > Add-ons", icon="ERROR")
@@ -97,6 +108,8 @@ class DEPTHSCENE_PT_object(_Base, bpy.types.Panel):
         col = layout.column(align=True)
         col.prop(o, "resolution")
         col.prop(o, "smooth")
+        if not (o.mode == "PERSPECTIVE" and o.mapping == "METRIC"):
+            col.prop(o, "layer_steps")
         if o.mode == "PERSPECTIVE":
             col = layout.column(align=True)
             col.prop(o, "fov")
