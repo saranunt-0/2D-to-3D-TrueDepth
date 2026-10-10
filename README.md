@@ -104,7 +104,7 @@ The full comparison and sources are in [docs/RESEARCH.md](docs/RESEARCH.md).
 | **MoGe-2 ViT-S** | 35 M | ~141 MB | MIT ✅ | metric depth **+ estimated FOV** | **corridors / perspective mode** |
 | Depth Anything V2 Base / Large | 97.5 M / 335 M | 390 MB / 1.34 GB | CC-BY-NC-4.0 ⚠️ | relative inverse depth | more detail, **non-commercial only** |
 | MoGe-2 ViT-B | 104 M | ~420 MB | MIT ✅ | metric + FOV | better geometry, slower |
-| Illustrator's Depth *(optional, manual)* | ~640 M (Depth Pro) | ~2.5 GB, you convert it | **Adobe Research: non-commercial research only** ⛔ | **layer index** (front-to-back order) | flat digital art / illustrations → layered relief or paper cut-out diorama |
+| Illustrator's Depth *(optional, manual)* | 648 M (Depth Pro) | 2.58 GB (fp16 1.29 GB), you convert it | **Adobe Research: non-commercial research only** ⛔ | **layer index** (front-to-back order) | flat digital art / illustrations → layered relief or paper cut-out diorama |
 
 Recommendation for corridor shots: use **MoGe-2 ViT-S** in Perspective mode,
 because it sets the FOV and gives straight walls without tuning. Use
@@ -131,9 +131,11 @@ Things to know before you use it:
   explicitly excludes developing commercial products. The add-on only
   *loads* a file you convert yourself; none of Adobe's code or weights is
   in this repo. Whether *your* use qualifies is your call.
-* **Size.** It is built on Apple Depth Pro: ~640 M parameters with a fixed
-  1536×1536 input and ~2.5 GB of weights. Expect seconds on a GPU and tens
-  of seconds or more on a CPU. It is not a "lightweight" model.
+* **Size.** It is built on Apple Depth Pro: 648 M parameters with a fixed
+  1536×1536 input and 2.58 GB of weights (1.29 GB as fp16). Measured on a
+  4-core CPU: about 75–85 s per image with roughly 10 GB of RAM in use.
+  A GPU makes it seconds. fp16 only helps on a GPU; on CPU it is no
+  faster and uses about 10 GB. It is not a "lightweight" model.
 * **Conversion (one time).** The authors ship a PyTorch checkpoint (via
   Google Drive), so convert it to ONNX in *their* environment:
 
