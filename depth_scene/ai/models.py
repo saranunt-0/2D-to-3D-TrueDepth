@@ -1,6 +1,6 @@
 """Registry of supported depth models.
 
-Two families, both run with ONNX Runtime (no PyTorch needed):
+Three families, all run with ONNX Runtime (no PyTorch needed):
 
 * Depth Anything V2 (S / B / L) - relative inverse depth ("disparity").
   Same ViT-S/B/L sizes TrueDepth exposes. Only Small is Apache-2.0; Base and
@@ -8,6 +8,12 @@ Two families, both run with ONNX Runtime (no PyTorch needed):
 * MoGe-2 (S / B) - monocular *geometry*: metric depth plus the camera field
   of view, which is what perspective reconstruction of a corridor needs.
   MIT licence.
+* Illustrator's Depth (Maruani et al., CVPR 2026) - per-pixel *layer index*
+  for illustrations / flat digital art, built on Apple Depth Pro (~0.64 B
+  params, fixed 1536 px input). Weights are under the Adobe Research
+  Licence (non-commercial research only) and ship as a PyTorch checkpoint,
+  so there is no download URL: users convert it once with
+  ``tools/export_illustrators_depth_onnx.py``.
 """
 
 HF = "https://huggingface.co"
@@ -15,17 +21,18 @@ HF = "https://huggingface.co"
 
 class ModelInfo:
     def __init__(self, key, label, family, size, params, license_id, commercial_ok,
-                 files, output_kind, description):
+                 files, output_kind, description, manual=""):
         self.key = key
         self.label = label
-        self.family = family            # "depth_anything_v2" | "moge2"
+        self.family = family            # "depth_anything_v2" | "moge2" | "illustrators_depth"
         self.size = size                # "ViT-S" ...
         self.params = params
         self.license_id = license_id
         self.commercial_ok = commercial_ok
-        self.files = files              # precision -> (url, approx MB)
-        self.output_kind = output_kind  # "disparity" | "metric"
+        self.files = files              # precision -> (url or None, approx MB)
+        self.output_kind = output_kind  # "disparity" | "metric" | "layers"
         self.description = description
+        self.manual = manual            # how to obtain the file when url is None
 
     def filename(self, precision):
         precision = precision if precision in self.files else "fp32"
@@ -72,6 +79,22 @@ def _moge(size_word, size, params, mb):
     )
 
 
+ILLUSTRATORS_DEPTH = ModelInfo(
+    key="illustrators_depth",
+    label="Illustrator's Depth (layers, research only)",
+    family="illustrators_depth",
+    size="Depth Pro (2x ViT-L)",
+    params="~640M",
+    license_id="Adobe Research (non-commercial research only)",
+    commercial_ok=False,
+    # No URL: the authors publish a PyTorch checkpoint on Google Drive.
+    files={"fp32": (None, 2550), "fp16": (None, 1280)},
+    output_kind="layers",
+    description="Layer index for illustrations / flat art, ~640M params, Adobe Research licence",
+    manual="Convert the checkpoint with tools/export_illustrators_depth_onnx.py "
+           "(see README) and put the .onnx (+ .onnx.data) in the models folder",
+)
+
 MODELS = {
     m.key: m
     for m in (
@@ -80,6 +103,7 @@ MODELS = {
         _da2("large", "ViT-L", "335M", "CC-BY-NC-4.0", False, 1340, 670),
         _moge("s", "ViT-S", "35M", 141),
         _moge("b", "ViT-B", "104M", 420),
+        ILLUSTRATORS_DEPTH,
     )
 }
 

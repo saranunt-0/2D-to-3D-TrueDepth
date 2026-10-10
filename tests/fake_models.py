@@ -56,3 +56,27 @@ def make_moge_like(path, affine_points, mask, metric_scale):
     model.ir_version = 8
     onnx.checker.check_model(model)
     onnx.save(model, path)
+
+
+def make_illustrators_depth_like(path, size=1536, outlier=True):
+    """image [1,3,S,S] in [-1,1] -> layer_depth [1,1,S,S] = channel mean (+ outlier).
+
+    Same names/shapes as tools/export_illustrators_depth_onnx.py produces. The
+    real head's -1/clamp(...) can saturate at -1e4; one planted pixel mimics
+    that so the add-on's outlier clipping is exercised.
+    """
+    image = helper.make_tensor_value_info("image", TensorProto.FLOAT, [1, 3, size, size])
+    out = helper.make_tensor_value_info("layer_depth", TensorProto.FLOAT, [1, 1, size, size])
+    spike = np.zeros((1, 1, size, size), np.float32)
+    if outlier:
+        spike[0, 0, 0, 0] = -1e4
+    nodes = [
+        helper.make_node("ReduceMean", ["image"], ["m"], axes=[1], keepdims=1),
+        helper.make_node("Constant", [], ["spike"], value=numpy_helper.from_array(spike, "spike_v")),
+        helper.make_node("Add", ["m", "spike"], ["layer_depth"]),
+    ]
+    graph = helper.make_graph(nodes, "fake_illustrators_depth", [image], [out])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    onnx.checker.check_model(model)
+    onnx.save(model, path)

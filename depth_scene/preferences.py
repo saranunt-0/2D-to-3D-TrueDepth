@@ -141,8 +141,9 @@ class DEPTHSCENE_OT_delete_model(bpy.types.Operator):
     def execute(self, context):
         runtime.clear_sessions()
         path = paths.model_path(models.get(self.model), self.precision)
-        if os.path.exists(path):
-            os.remove(path)
+        for p in (path, path + ".data"):    # big models keep weights in a .data sidecar
+            if os.path.exists(p):
+                os.remove(p)
         return {"FINISHED"}
 
 
@@ -191,12 +192,16 @@ class DepthScenePreferences(bpy.types.AddonPreferences):
                 elif os.path.exists(paths.model_path(info, precision)):
                     op = row.operator(DEPTHSCENE_OT_delete_model.bl_idname, text="", icon="TRASH")
                     op.model, op.precision = info.key, precision
+                elif info.url(precision) is None:
+                    row.label(text=f"manual: {info.filename(precision)}")
                 else:
                     op = row.operator(DEPTHSCENE_OT_download_model.bl_idname, text="Download", icon="URL")
                     op.model, op.precision = info.key, precision
         col = box.column(align=True)
         col.label(text="Depth Anything V2 Base/Large weights are CC-BY-NC-4.0: non-commercial use only.", icon="INFO")
         col.label(text="Small (Apache-2.0) and MoGe-2 (MIT) are fine for commercial work.")
+        col.label(text="Illustrator's Depth: Adobe Research licence - academic research/teaching only.", icon="ERROR")
+        col.label(text="Convert it with tools/export_illustrators_depth_onnx.py (see README).")
 
 
 classes = (DEPTHSCENE_OT_install_ort, DEPTHSCENE_OT_download_model, DEPTHSCENE_OT_delete_model, DepthScenePreferences)

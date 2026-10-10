@@ -56,6 +56,31 @@ for arbitrary paintings and photos [inference].
   when an official ONNX export appears; it would slot into `ai/infer.py`
   as a third family.
 
+### 2.1 Addendum (2026-10-10): Illustrator's Depth
+
+Added at the user's request as an optional, manually converted model.
+
+* **What it predicts** [fact, from the repo source]: a per-pixel *layer
+  index*. Ground truth is each SVG element's document order (later-drawn =
+  higher index = on top). Training uses an L1 loss on median/mean-deviation
+  normalised maps of the same sign, so the output grows toward the front. It
+  is an ordering, not a distance. The add-on stores it as kind `layers`
+  (normalised like disparity, mapped LINEAR).
+* **Architecture** [fact]: Apple Depth Pro's encoder (patch + image DINOv2
+  ViT-L), decoder and head. The FOV head is dropped. Forward returns
+  `-1/clamp(head, 1e-4, 1e4)`. Input is a plain resize to 1536×1536 with
+  Normalize(0.5, 0.5). The add-on clips the 0.5/99.5 percentiles because
+  the clamp can saturate.
+* **Licence** [fact]: Adobe Research License, noncommercial research only
+  ("academic research and teaching"; excludes "development of commercial
+  products"). That is stricter than CC-BY-NC. The add-on ships no Adobe
+  code or weights. Users run `tools/export_illustrators_depth_onnx.py`
+  inside the authors' environment, and the resulting ONNX inherits the
+  restriction.
+* **Weights** are a PyTorch Lightning checkpoint on Google Drive (no ONNX
+  release, no Hugging Face mirror). They were unreachable from the
+  development sandbox, so the checkpoint-loading step is **unverified**.
+
 ## 3. Reconstruction maths
 
 ### 3.1 Unprojection (Perspective mode)
@@ -160,6 +185,15 @@ All on Blender **4.2.23 LTS** (Python 3.11, NumPy 1.26) and **5.2.2 LTS**
 - [ ] UI interaction in a real Blender window (panels were checked with a
   validating fake layout, not clicked).
 
+### Unverified items (Illustrator's Depth)
+
+- [ ] Real checkpoint → `export_illustrators_depth_onnx.py --check` (expected:
+  ONNX vs PyTorch relative difference < 1e-3).
+- [ ] Output direction on a real image: front shapes should get *higher*
+  values (`kind = layers`). If the relief comes out inverted, tick *Invert*
+  and report it.
+- [ ] fp16 export accuracy and speed on a GPU.
+
 ## Sources
 
 - Depth Anything V2 README (params, licence, input size 518): https://github.com/DepthAnything/Depth-Anything-V2
@@ -170,4 +204,6 @@ All on Blender **4.2.23 LTS** (Python 3.11, NumPy 1.26) and **5.2.2 LTS**
 - Depth Anything 3 (model table, licences): https://github.com/ByteDance-Seed/Depth-Anything-3 · https://huggingface.co/depth-anything/DA3-BASE
 - Community DA3 ONNX examples: https://huggingface.co/Heliosoph/da3-base-onnx · https://github.com/devin-lai/Depth-Anything-3-Onnx · https://huggingface.co/qualcomm/Depth-Anything-V3
 - Cross-model benchmark (wildlife): https://arxiv.org/html/2510.04723v1
+- Illustrator's Depth (code, licence, model): https://github.com/nissmar/illustrators_depth · paper: https://arxiv.org/abs/2511.17454
+- Apple Depth Pro (backbone): https://github.com/apple/ml-depth-pro
 - TrueDepth: https://superhivemarket.com/products/truedepth · https://www.creativeshrimp.com/true-depth-blender-add-on-the-complete-guide-v3.html

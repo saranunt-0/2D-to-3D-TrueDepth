@@ -19,6 +19,7 @@ KIND_ITEMS = [
     ("disparity", "White = Near", "Relative inverse depth (Depth Anything, MiDaS, most AI depth maps)"),
     ("depth", "White = Far", "Relative depth (z-buffer style maps)"),
     ("metric", "Metric (metres)", "Absolute planar depth, e.g. EXR from MoGe or a renderer"),
+    ("layers", "Layer Index", "Illustrator's depth: higher = layer drawn on top (ordering, not distance)"),
 ]
 MAPPING_ITEMS = [
     ("INVERSE", "Inverse", "1/z interpolated between near and far - correct for disparity maps"),
@@ -66,6 +67,9 @@ class DepthSceneSettings(bpy.types.PropertyGroup):
     input_size: IntProperty(name="Inference Size", default=518, min=266, max=1792, step=14,
                             description="Model input size (shorter side for Depth Anything, token budget for MoGe). "
                                         "Higher = more detail, slower")
+    input_blur: FloatProperty(name="Input Blur", default=0.0, min=0.0, soft_max=4.0, max=20.0,
+                              description="Illustrator's Depth only: blur the 1536 px input first "
+                                          "(the authors' gaussian_sigma) - helps with canvas/paper texture")
     use_existing_depth: BoolProperty(name="Use Existing Depth Map", default=False)
     existing_depth: PointerProperty(name="Depth Map", type=bpy.types.Image)
     existing_kind: EnumProperty(name="Depth Map Type", items=KIND_ITEMS, default="disparity")
@@ -108,6 +112,9 @@ class DepthSceneObject(bpy.types.PropertyGroup):
     detail_radius: FloatProperty(name="Detail Radius", default=0.5, min=0.05, soft_max=3.0, max=10.0,
                                  subtype="PERCENTAGE", precision=2, update=_rebuild,
                                  description="Size of the details kept by Detail Displacement, % of image size")
+    layer_steps: IntProperty(name="Quantize Layers", default=0, min=0, soft_max=32, max=256, update=_rebuild,
+                             description="Snap depth to this many flat layers (0 = continuous). "
+                                         "Gives a paper cut-out / diorama look; ideal with Illustrator's Depth")
     use_alpha: BoolProperty(name="Use Alpha Channel", default=False, update=_rebuild,
                             description="Delete faces where the image is transparent")
     remove_masked: BoolProperty(name="Remove Sky / Invalid", default=False, update=_rebuild,
