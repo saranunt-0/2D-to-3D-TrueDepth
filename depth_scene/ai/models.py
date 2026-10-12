@@ -1,113 +1,63 @@
-"""Registry of supported depth models.
+"""Registry of supported depth models - Marigold branch.
 
-Three families, all run with ONNX Runtime (no PyTorch needed):
+This branch ships a single model family, Marigold depth (Ke et al., CVPR 2024,
+https://github.com/prs-eth/Marigold): Stable Diffusion 2 fine-tuned into an
+affine-invariant depth estimator, run with ONNX Runtime (no PyTorch).
 
-* Depth Anything V2 (S / B / L) - relative inverse depth ("disparity").
-  Same ViT-S/B/L sizes TrueDepth exposes. Only Small is Apache-2.0; Base and
-  Large weights are CC-BY-NC-4.0 (non-commercial use only).
-* MoGe-2 (S / B) - monocular *geometry*: metric depth plus the camera field
-  of view, which is what perspective reconstruction of a corridor needs.
-  MIT licence.
-* Illustrator's Depth (Maruani et al., CVPR 2026) - per-pixel *layer index*
-  for illustrations / flat digital art, built on Apple Depth Pro (~0.64 B
-  params, fixed 1536 px input). Weights are under the Adobe Research
-  Licence (non-commercial research only) and ship as a PyTorch checkpoint,
-  so there is no download URL: users convert it once with
-  ``tools/export_illustrators_depth_onnx.py``.
+Licence (checked 2026-10-12):
+* code (prs-eth/Marigold): Apache-2.0;
+* weights (prs-eth/marigold-depth-v1-1): CreativeML Open RAIL++-M - commercial
+  use is allowed, but use-based restrictions apply and must be passed on when
+  the weights (or ONNX conversions) are redistributed. Marigold is a derivative
+  of Stable Diffusion 2, whose Open RAIL++-M lists the concrete restrictions.
+
+The authors publish diffusers/PyTorch weights only, so users convert them once
+with ``tools/export_marigold_onnx.py`` (needs torch + diffusers).
 """
-
-HF = "https://huggingface.co"
 
 
 class ModelInfo:
-    def __init__(self, key, label, family, size, params, license_id, commercial_ok,
-                 files, output_kind, description, manual=""):
+    def __init__(self, key, label, family, params, license_id, commercial_ok, files,
+                 output_kind, description, manual=""):
         self.key = key
         self.label = label
-        self.family = family            # "depth_anything_v2" | "moge2" | "illustrators_depth"
-        self.size = size                # "ViT-S" ...
+        self.family = family            # "marigold"
         self.params = params
         self.license_id = license_id
         self.commercial_ok = commercial_ok
-        self.files = files              # precision -> (url or None, approx MB)
-        self.output_kind = output_kind  # "disparity" | "metric" | "layers"
+        self.files = files              # precision -> approx MB (a folder of ONNX files)
+        self.output_kind = output_kind  # "depth": 0 = near, 1 = far
         self.description = description
-        self.manual = manual            # how to obtain the file when url is None
+        self.manual = manual
 
     def filename(self, precision):
+        """Folder name holding vae_encoder/unet/vae_decoder.onnx + marigold.json."""
         precision = precision if precision in self.files else "fp32"
-        return f"{self.key}_{precision}.onnx"
-
-    def url(self, precision):
-        precision = precision if precision in self.files else "fp32"
-        return self.files[precision][0]
+        return f"{self.key}_{precision}"
 
     def size_mb(self, precision):
         precision = precision if precision in self.files else "fp32"
-        return self.files[precision][1]
+        return self.files[precision]
 
 
-def _da2(size_word, size, params, lic, ok, mb32, mb16):
-    repo = f"{HF}/onnx-community/depth-anything-v2-{size_word}/resolve/main/onnx"
-    return ModelInfo(
-        key=f"da2_{size_word}",
-        label=f"Depth Anything V2 {size_word.title()}",
-        family="depth_anything_v2",
-        size=size,
-        params=params,
-        license_id=lic,
-        commercial_ok=ok,
-        files={"fp32": (f"{repo}/model.onnx", mb32), "fp16": (f"{repo}/model_fp16.onnx", mb16)},
-        output_kind="disparity",
-        description=f"Relative depth, {params} params, {lic}",
-    )
-
-
-def _moge(size_word, size, params, mb):
-    url = f"{HF}/Ruicheng/moge-2-vit{size_word}-normal-onnx/resolve/main/model.onnx"
-    return ModelInfo(
-        key=f"moge2_vit{size_word}",
-        label=f"MoGe-2 ViT-{size_word.upper()} (geometry + FOV)",
-        family="moge2",
-        size=size,
-        params=params,
-        license_id="MIT",
-        commercial_ok=True,
-        files={"fp32": (url, mb)},
-        output_kind="metric",
-        description=f"Metric depth + estimated FOV, {params} params, MIT",
-    )
-
-
-ILLUSTRATORS_DEPTH = ModelInfo(
-    key="illustrators_depth",
-    label="Illustrator's Depth (layers, research only)",
-    family="illustrators_depth",
-    size="Depth Pro (2x ViT-L)",
-    params="~640M",
-    license_id="Adobe Research (non-commercial research only)",
-    commercial_ok=False,
-    # No URL: the authors publish a PyTorch checkpoint on Google Drive.
-    files={"fp32": (None, 2550), "fp16": (None, 1280)},
-    output_kind="layers",
-    description="Layer index for illustrations / flat art, ~640M params, Adobe Research licence",
-    manual="Convert the checkpoint with tools/export_illustrators_depth_onnx.py "
-           "(see README) and put the .onnx (+ .onnx.data) in the models folder",
+MARIGOLD_DEPTH_V1_1 = ModelInfo(
+    key="marigold_depth_v1_1",
+    label="Marigold Depth v1.1",
+    family="marigold",
+    params="~950M (SD2 U-Net 865M + VAE 84M)",
+    license_id="CreativeML Open RAIL++-M",
+    commercial_ok=True,
+    # Measured export sizes; fp16 halves the U-Net only (VAE stays fp32).
+    files={"fp32": 3620, "fp16": 1970},
+    output_kind="depth",
+    description="Diffusion-based affine-invariant depth, ~950M params, Open RAIL++-M",
+    manual="Convert prs-eth/marigold-depth-v1-1 with tools/export_marigold_onnx.py "
+           "(see README) and put the output folder in the models folder",
 )
 
-MODELS = {
-    m.key: m
-    for m in (
-        _da2("small", "ViT-S", "24.8M", "Apache-2.0", True, 99, 50),
-        _da2("base", "ViT-B", "97.5M", "CC-BY-NC-4.0", False, 390, 195),
-        _da2("large", "ViT-L", "335M", "CC-BY-NC-4.0", False, 1340, 670),
-        _moge("s", "ViT-S", "35M", 141),
-        _moge("b", "ViT-B", "104M", 420),
-        ILLUSTRATORS_DEPTH,
-    )
-}
+MODELS = {m.key: m for m in (MARIGOLD_DEPTH_V1_1,)}
 
-DEFAULT_MODEL = "da2_small"
+DEFAULT_MODEL = MARIGOLD_DEPTH_V1_1.key
 
 
 def get(key):

@@ -18,33 +18,28 @@ RIG_ROTATION = (math.pi / 2, 0.0, 0.0)   # camera space (-Z forward) -> world (+
 # ----------------------------------------------------------------------------- depth
 
 def depth_signature(s, image):
-    return f"{image.name_full}|{s.model}|{s.custom_model_path}|{s.precision}|{s.input_size}|{s.input_blur}"
+    return (f"{image.name_full}|{s.model}|{s.precision}|{s.input_size}|{s.denoise_steps}|"
+            f"{s.ensemble_size}|{s.seed}")
 
 
-def generate_depth(scene_settings, image):
-    """Run the selected model on ``image``; returns (depth Image, kind, fov or None, result)."""
+def generate_depth(scene_settings, image, progress=None):
+    """Run Marigold on ``image``; returns (depth Image, kind, result)."""
     s = scene_settings
-    if s.model == "CUSTOM":
-        model_file = bpy.path.abspath(s.custom_model_path)
-        info = models.ModelInfo("custom", "Custom", "depth_anything_v2", "", "", "", True, {}, "disparity", "")
-    else:
-        info = models.get(s.model)
-        model_file = paths.model_path(info, s.precision)
-    if not model_file or not os.path.exists(model_file):
-        hint = info.manual or "download it in the add-on preferences"
-        raise RuntimeError(f"Model file not found: {model_file or '(none)'} - {hint}")
+    info = models.get(s.model)
+    model_dir = paths.model_path(info, s.precision)
+    if not os.path.isdir(model_dir):
+        raise RuntimeError(f"Model folder not found: {model_dir} - {info.manual}")
 
     rgb = bimage.display_rgb(image)
-    result = infer.estimate(info, model_file, rgb, device=s.device, input_size=s.input_size,
-                            input_blur=s.input_blur)
+    result = infer.estimate(info, model_dir, rgb, device=s.device, processing_resolution=s.input_size,
+                            steps=s.denoise_steps, ensemble_size=s.ensemble_size, seed=s.seed,
+                            progress=progress)
     folder = bimage.output_dir(s.save_location)
     name = f"{os.path.splitext(image.name)[0]}_depth"
     depth_img = bimage.write_depth(name, result.depth, result.valid, folder)
     depth_img["depth_scene_kind"] = result.kind
     depth_img["depth_scene_source"] = depth_signature(s, image)
-    if result.fov:
-        depth_img["depth_scene_fov"] = float(result.fov)
-    return depth_img, result.kind, result.fov, result
+    return depth_img, result.kind, result
 
 
 def suggest_near_far(depth, kind, valid):
@@ -58,8 +53,6 @@ def suggest_near_far(depth, kind, valid):
         lo = max(float(np.percentile(vals, 0.5)), hi / 100.0, 1e-6)
         ratio = float(np.clip(hi / lo, 1.5, 100.0))
         return 1.0, ratio
-    if kind == "layers":
-        return 1.0, 2.0       # shallow stack of layers; widen Far to separate them
     return 1.0, 10.0
 
 
@@ -71,8 +64,7 @@ def _params(o):
         far=max(o.far, o.near + 1e-3), metric_scale=o.metric_scale, remove_stretched=o.remove_stretched,
         stretch_angle=o.stretch_angle, size=o.size, base_displacement=o.base_displacement,
         invert=o.invert, smooth=o.smooth, detail_strength=o.detail_strength,
-        detail_radius=o.detail_radius, use_alpha=o.use_alpha, remove_masked=o.remove_masked,
-        layer_steps=o.layer_steps,
+        detail_radius=o.detail_radius, use_alpha=o.use_alpha, layer_steps=o.layer_steps,
     )
 
 
@@ -244,7 +236,7 @@ def add_camera_move(obj, move, distance, frame_start, frame_end):
 
 # ----------------------------------------------------------------------------- scene
 
-def build_scene(context, image, depth_img, kind, mode, est_fov=None):
+def build_scene(context, image, depth_img, kind, mode):
     """Create rig + mesh + cameras + material for ``image``/``depth_img``."""
     scene = context.scene
     s = scene.depth_scene
@@ -278,9 +270,6 @@ def build_scene(context, image, depth_img, kind, mode, est_fov=None):
     o.depth_kind = kind
     o.projector = projector
     o.shot_camera = shot
-    if est_fov:
-        o.estimated_fov = est_fov
-        o.fov = est_fov
     depth, valid = bimage.depth_arrays(depth_img)
     near, far = suggest_near_far(depth, kind, valid)
     o.near, o.far = near, far

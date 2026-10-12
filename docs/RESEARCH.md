@@ -5,6 +5,92 @@ source · **[strong]** consistent across several secondary sources ·
 **[inference]** my reasoning · **[unverified]** could not be tested in the
 development sandbox.
 
+## 0. Branch `marigold` (2026-10-12)
+
+This branch ships **only** Marigold depth
+([prs-eth/Marigold](https://github.com/prs-eth/Marigold), Ke et al., CVPR 2024).
+Depth Anything V2, MoGe-2 and Illustrator's Depth were removed. Sections 1–4
+below record the original model survey from `main`, for context.
+
+### 0.1 Licence [fact, primary sources]
+
+| Item | Licence | Source |
+|---|---|---|
+| Code | Apache-2.0 | `LICENSE.txt`; README "🎫 License" |
+| Weights (`marigold-depth-v1-1`) | Open RAIL++-M (dated 2024-11-22, "based on the CreativeML Open RAIL-M") | `LICENSE-MODEL.txt`; HF card licence field `openrail++` |
+| Base model (Stable Diffusion 2) | CreativeML Open RAIL++-M | Marigold README (fine-tuned from SD2) |
+
+* §2 grants a perpetual, royalty-free licence to reproduce, distribute and
+  sublicense. There is no non-commercial clause, and §4 explicitly allows
+  hosting as a service. **Commercial use is allowed.**
+* §4 conditions apply on redistribution of the Model or Derivatives (ONNX
+  conversions count): pass on the §5 use restrictions as an enforceable
+  term, include the licence, mark changed files, and keep notices.
+* §6: the licensor claims no rights in outputs.
+* ⚠️ Attachment A (the list of restrictions) in Marigold's
+  `LICENSE-MODEL.txt` is an **unfilled template** ("[insert use
+  restrictions]"). The SD2 Open RAIL++-M it derives from does list them, and
+  a derivative of SD2 must carry them, so treat SD2's list as binding
+  [inference]. This needs a legal check before shipping weights in a
+  product.
+* The HF card for `marigold-depth-hr-v1-1` says Apache-2.0 while the repo
+  says RAIL++-M, which is inconsistent [fact]. Assume RAIL++-M.
+* "Marigold V2" (Huawei, arXiv 2609.08084, Sept 2026) is a different
+  ~20 B-parameter model built on Qwen-Image-Edit. It is out of scope for
+  in-Blender use.
+
+### 0.2 How it runs in the add-on
+
+The diffusers `MarigoldDepthPipeline` (read from source) is:
+
+1. image × 2 − 1;
+2. resize the longest edge to the processing resolution (antialiased);
+3. replicate-pad bottom/right to a multiple of 8;
+4. VAE-encode, taking the posterior mode × 0.18215;
+5. take a noise latent; for each DDIM step, the U-Net receives
+   [image latent ‖ depth latent] (8 channels), the timestep, and a 2-token
+   empty-prompt CLIP embedding;
+6. VAE-decode, channel mean, clip to [−1, 1], then (x+1)/2;
+7. unpad;
+8. if Ensemble > 1, align the runs (SciPy) and take the median.
+
+The output is affine-invariant depth: the paper normalises *depth* between
+its 2nd and 98th percentiles, so 0 = near and 1 = far.
+
+`tools/export_marigold_onnx.py` exports `vae_encoder`, `unet` (with the empty
+embedding baked in) and `vae_decoder` as ONNX, plus `marigold.json` with the
+checkpoint's own scheduler numbers. `core/ddim.py` ports `DDIMScheduler`
+(`set_timesteps` + `step`, eta 0). `ai/marigold.py` re-implements the loop.
+Ensembling uses an iterative least-squares scale/shift alignment because
+Blender has no SciPy [approximation].
+
+### 0.3 Validation [measured; real architecture, random weights]
+
+* **DDIM port vs diffusers `DDIMScheduler`:**
+  * covers epsilon / v / sample prediction × leading / trailing / linspace
+    spacing, with and without zero-SNR, at 1–50 steps;
+  * timesteps are identical;
+  * worst relative state error is 1.0e-6.
+* **Export:** U-Net 866 M + VAE 84 M parameters. The fp32 folder is
+  3.6 GB (U-Net in `unet.onnx.data`) and exports in ~2 min. The fp16 folder
+  is 2.0 GB, using the same >2 GB shape-inference and Cast fixes as the
+  Depth Pro export.
+* **End to end:** the add-on's NumPy/ONNX loop vs the diffusers pipeline,
+  from identical noise (2 steps, 384×256): max |diff| **5.6e-6**, with the
+  same runtime (8.3 s vs 8.4 s).
+* **CPU cost** (4 cores, ORT 1.30 inside Blender 5.2's Python, 1 step):
+  * 768 px: 32 s;
+  * 384 px: 8.9 s fp32, 5.4 s fp16 (max depth difference 0.008);
+  * peak RSS ≈ 9 GB.
+
+### 0.4 Unverified
+
+- [ ] Real checkpoint conversion (Hugging Face is blocked in the sandbox):
+  `python tools/export_marigold_onnx.py --check --fp16`. Expect max |diff|
+  < 1e-4 vs diffusers.
+- [ ] Depth quality on the corridor painting and the illustration.
+- [ ] GPU providers (CUDA / DirectML / CoreML) with the fp16 U-Net.
+
 ## 1. Requirements
 
 1. Runs **inside Blender's bundled Python**, which has NumPy but no
@@ -195,6 +281,10 @@ All on Blender **4.2.23 LTS** (Python 3.11, NumPy 1.26) and **5.2.2 LTS**
 - [ ] fp16 export accuracy and speed on a GPU.
 
 ## Sources
+
+- Marigold code, licences, news: https://github.com/prs-eth/Marigold · weights: https://huggingface.co/prs-eth/marigold-depth-v1-1 · paper: https://arxiv.org/abs/2312.02145
+- diffusers Marigold pipeline (source read for the port): https://github.com/huggingface/diffusers/tree/main/src/diffusers/pipelines/marigold
+- Marigold V2 (Huawei, different model): https://github.com/huawei-bayerlab/marigold-v2
 
 - Depth Anything V2 README (params, licence, input size 518): https://github.com/DepthAnything/Depth-Anything-V2
 - onnx-community DA2 exports: https://huggingface.co/onnx-community/depth-anything-v2-small · https://huggingface.co/onnx-community/depth-anything-v2-large/tree/main/onnx

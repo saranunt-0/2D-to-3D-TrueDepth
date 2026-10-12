@@ -55,21 +55,21 @@ def choose_providers(device):
     return gpus[:1] + ["CPUExecutionProvider"]
 
 
-def get_session(model_path, device="AUTO"):
+def get_sessions(model_paths, device="AUTO"):
+    """ORT sessions for a set of graphs that run together (one model in memory)."""
     ort = import_ort()
     if ort is None:
         raise RuntimeError("ONNX Runtime is not installed. Open Preferences > Add-ons > Depth Scene and click 'Install ONNX Runtime'.")
     providers = choose_providers(device)
-    key = (os.path.abspath(model_path), os.path.getmtime(model_path), tuple(providers))
-    sess = _SESSIONS.get(key)
-    if sess is None:
+    keys = [(os.path.abspath(p), os.path.getmtime(p), tuple(providers)) for p in model_paths]
+    if set(keys) != set(_SESSIONS):
+        _SESSIONS.clear()          # drop the previous model before loading the next
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         opts.log_severity_level = 3
-        sess = ort.InferenceSession(model_path, sess_options=opts, providers=providers)
-        _SESSIONS.clear()          # keep only one model in memory
-        _SESSIONS[key] = sess
-    return sess
+        for key, path in zip(keys, model_paths):
+            _SESSIONS[key] = ort.InferenceSession(path, sess_options=opts, providers=providers)
+    return [_SESSIONS[k] for k in keys]
 
 
 def clear_sessions():

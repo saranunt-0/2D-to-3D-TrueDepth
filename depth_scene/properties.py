@@ -9,22 +9,20 @@ from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
 from .ai import models
 
 MODEL_ITEMS = [(m.key, m.label, m.description) for m in models.MODELS.values()]
-MODEL_ITEMS.append(("CUSTOM", "Custom ONNX file", "Any Depth-Anything-style ONNX (image -> relative inverse depth)"))
 
 MODE_ITEMS = [
     ("PERSPECTIVE", "Perspective", "Unproject pixels along camera rays - true 3D for corridors, rooms, streets"),
     ("RELIEF", "Flat Relief", "Displace a flat plane toward the camera - bas-relief look"),
 ]
 KIND_ITEMS = [
-    ("disparity", "White = Near", "Relative inverse depth (Depth Anything, MiDaS, most AI depth maps)"),
-    ("depth", "White = Far", "Relative depth (z-buffer style maps)"),
-    ("metric", "Metric (metres)", "Absolute planar depth, e.g. EXR from MoGe or a renderer"),
-    ("layers", "Layer Index", "Illustrator's depth: higher = layer drawn on top (ordering, not distance)"),
+    ("disparity", "White = Near", "Relative inverse depth (most AI depth maps from other tools)"),
+    ("depth", "White = Far", "Relative depth (Marigold output, z-buffer style maps)"),
+    ("metric", "Metric (metres)", "Absolute planar depth, e.g. EXR from a renderer"),
 ]
 MAPPING_ITEMS = [
     ("INVERSE", "Inverse", "1/z interpolated between near and far - correct for disparity maps"),
     ("LINEAR", "Linear", "z interpolated between near and far - correct for 'white = far' maps"),
-    ("METRIC", "Metric", "Use the model's metric depth directly (MoGe / metric EXR)"),
+    ("METRIC", "Metric", "Use metric depth directly (metric EXR)"),
 ]
 SHADING_ITEMS = [
     ("EMISSION", "Emission (exact colours)", "Unlit: renders exactly like the source image from the projector camera"),
@@ -56,20 +54,24 @@ class DepthSceneSettings(bpy.types.PropertyGroup):
 
     image: PointerProperty(name="Image", type=bpy.types.Image)
     model: EnumProperty(name="Model", items=MODEL_ITEMS, default=0)
-    custom_model_path: StringProperty(name="ONNX File", subtype="FILE_PATH")
     device: EnumProperty(name="Device", items=[
         ("AUTO", "Auto", "GPU if available, else CPU"),
         ("GPU", "GPU", "CUDA / DirectML / CoreML"),
         ("CPU", "CPU", "Always CPU")], default="AUTO")
     precision: EnumProperty(name="Precision", items=[
         ("fp32", "Float32", "Full precision (recommended on CPU)"),
-        ("fp16", "Float16", "Half the download/memory; fastest on GPU")], default="fp32")
-    input_size: IntProperty(name="Inference Size", default=518, min=266, max=1792, step=14,
-                            description="Model input size (shorter side for Depth Anything, token budget for MoGe). "
-                                        "Higher = more detail, slower")
-    input_blur: FloatProperty(name="Input Blur", default=0.0, min=0.0, soft_max=4.0, max=20.0,
-                              description="Illustrator's Depth only: blur the 1536 px input first "
-                                          "(the authors' gaussian_sigma) - helps with canvas/paper texture")
+        ("fp16", "Float16", "fp16 U-Net: ~half the memory and faster; tiny depth differences")], default="fp32")
+    input_size: IntProperty(name="Processing Resolution", default=768, min=0, soft_min=256, max=2048, step=8,
+                            description="Longer image side fed to Marigold (768 = what Stable Diffusion 2 was "
+                                        "trained at; 0 = native size). Lower = faster, less detail")
+    denoise_steps: IntProperty(name="Denoising Steps", default=0, min=0, soft_max=10, max=50,
+                               description="Diffusion steps (0 = checkpoint default). v1.1 is trained for 1-4; "
+                                           "more steps cost time and rarely help")
+    ensemble_size: IntProperty(name="Ensemble", default=1, min=1, soft_max=10, max=20,
+                               description="Average several predictions with different noise. "
+                                           "Smoother, more reliable, but N times slower")
+    seed: IntProperty(name="Seed", default=0, min=0,
+                      description="Noise seed - same seed + settings = same depth map")
     use_existing_depth: BoolProperty(name="Use Existing Depth Map", default=False)
     existing_depth: PointerProperty(name="Depth Map", type=bpy.types.Image)
     existing_kind: EnumProperty(name="Depth Map Type", items=KIND_ITEMS, default="disparity")
@@ -94,7 +96,6 @@ class DepthSceneObject(bpy.types.PropertyGroup):
     image: PointerProperty(name="Image", type=bpy.types.Image, update=_material)
     depth_image: PointerProperty(name="Depth", type=bpy.types.Image, update=_rebuild)
     depth_kind: EnumProperty(name="Depth Type", items=KIND_ITEMS, default="disparity", update=_rebuild)
-    estimated_fov: FloatProperty(name="Estimated FOV", subtype="ANGLE", default=0.0)
     projector: PointerProperty(name="Projector Camera", type=bpy.types.Object)
     shot_camera: PointerProperty(name="Shot Camera", type=bpy.types.Object)
     material: PointerProperty(name="Material", type=bpy.types.Material)
@@ -117,8 +118,6 @@ class DepthSceneObject(bpy.types.PropertyGroup):
                                          "Gives a paper cut-out / diorama look; ideal with Illustrator's Depth")
     use_alpha: BoolProperty(name="Use Alpha Channel", default=False, update=_rebuild,
                             description="Delete faces where the image is transparent")
-    remove_masked: BoolProperty(name="Remove Sky / Invalid", default=False, update=_rebuild,
-                                description="Delete faces the model marked invalid (MoGe sky mask)")
 
     # ---- perspective
     fov: FloatProperty(name="Field of View", subtype="ANGLE", default=math.radians(60.0),

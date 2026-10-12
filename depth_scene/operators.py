@@ -1,7 +1,5 @@
 """User-facing operators."""
 
-import math
-
 import bpy
 from bpy.props import EnumProperty, FloatProperty, IntProperty
 
@@ -11,6 +9,23 @@ from . import bimage, builder
 def _cursor(context, kind):
     if context.window is not None:      # None when run from a script
         context.window.cursor_set(kind)
+
+
+class _Progress:
+    """Marigold takes seconds to minutes: show progress on the cursor/status bar."""
+
+    def __init__(self, context):
+        self.wm = context.window_manager if context.window is not None else None
+        if self.wm:
+            self.wm.progress_begin(0, 100)
+
+    def __call__(self, fraction):
+        if self.wm:
+            self.wm.progress_update(int(fraction * 100))
+
+    def end(self):
+        if self.wm:
+            self.wm.progress_end()
 
 
 def _active_depth_object(context):
@@ -33,19 +48,19 @@ class DEPTHSCENE_OT_generate_depth(bpy.types.Operator):
     def execute(self, context):
         s = context.scene.depth_scene
         _cursor(context, "WAIT")
+        progress = _Progress(context)
         try:
-            depth_img, kind, fov, result = builder.generate_depth(s, s.image)
+            depth_img, kind, result = builder.generate_depth(s, s.image, progress=progress)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
+            progress.end()
             _cursor(context, "DEFAULT")
         s.existing_depth = depth_img
         s.existing_kind = kind
-        msg = f"Depth {depth_img.size[0]}x{depth_img.size[1]} in {result.seconds:.2f}s on {result.provider}"
-        if fov:
-            msg += f", estimated FOV {math.degrees(fov):.1f} deg"
-        self.report({"INFO"}, msg)
+        self.report({"INFO"}, f"Depth {depth_img.size[0]}x{depth_img.size[1]} in {result.seconds:.1f}s "
+                              f"on {result.provider}")
         return {"FINISHED"}
 
 
@@ -62,7 +77,7 @@ class DEPTHSCENE_OT_build(bpy.types.Operator):
     def execute(self, context):
         s = context.scene.depth_scene
         image = s.image
-        fov = None
+        progress = _Progress(context)
         try:
             if s.use_existing_depth:
                 if s.existing_depth is None:
@@ -70,21 +85,20 @@ class DEPTHSCENE_OT_build(bpy.types.Operator):
                 depth_img, kind = s.existing_depth, s.existing_kind
                 if not depth_img.is_float or depth_img.colorspace_settings.name != "Non-Color":
                     depth_img.colorspace_settings.name = "Non-Color"
-                fov = depth_img.get("depth_scene_fov")
             elif (s.existing_depth is not None
                   and s.existing_depth.get("depth_scene_source") == builder.depth_signature(s, image)):
                 # Same image + model settings: reuse the depth from 'Generate Depth Map'.
                 depth_img, kind = s.existing_depth, s.existing_kind
-                fov = depth_img.get("depth_scene_fov")
             else:
                 _cursor(context, "WAIT")
-                depth_img, kind, fov, result = builder.generate_depth(s, image)
+                depth_img, kind, _ = builder.generate_depth(s, image, progress=progress)
                 s.existing_depth, s.existing_kind = depth_img, kind
-            obj = builder.build_scene(context, image, depth_img, kind, s.mode, est_fov=fov)
+            obj = builder.build_scene(context, image, depth_img, kind, s.mode)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
+            progress.end()
             _cursor(context, "DEFAULT")
         o = obj.depth_scene
         self.report({"INFO"}, f"Built '{obj.name}': {o.stat_faces} faces, {o.stat_removed} stretched removed")
@@ -110,23 +124,6 @@ class DEPTHSCENE_OT_rebuild(bpy.types.Operator):
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        return {"FINISHED"}
-
-
-class DEPTHSCENE_OT_apply_estimated_fov(bpy.types.Operator):
-    bl_idname = "depth_scene.apply_estimated_fov"
-    bl_label = "Use Estimated FOV"
-    bl_description = "Set the FOV to the value estimated by the geometry model"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        obj = _active_depth_object(context)
-        return obj is not None and obj.depth_scene.estimated_fov > 0
-
-    def execute(self, context):
-        o = _active_depth_object(context).depth_scene
-        o.fov = o.estimated_fov
         return {"FINISHED"}
 
 
@@ -213,7 +210,6 @@ classes = (
     DEPTHSCENE_OT_generate_depth,
     DEPTHSCENE_OT_build,
     DEPTHSCENE_OT_rebuild,
-    DEPTHSCENE_OT_apply_estimated_fov,
     DEPTHSCENE_OT_camera_move,
     DEPTHSCENE_OT_reset_shot,
     DEPTHSCENE_OT_look_through,

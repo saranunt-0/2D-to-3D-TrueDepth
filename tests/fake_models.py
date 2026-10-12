@@ -1,82 +1,115 @@
-"""Tiny ONNX graphs with the same I/O signature as the real depth models.
+"""Tiny ONNX graphs with the same I/O contract as the exported Marigold graphs.
 
 Real weights cannot be downloaded in CI, so these stand-ins exercise the
-whole inference path (feeds, dtypes, dynamic shapes, post-processing).
+add-on's denoising loop end to end (feeds, timestep dtype, latent shapes,
+concatenation order, unpadding, ensembling). Each fake is simple enough that
+tests can recompute the expected depth in NumPy.
 """
+
+import json
+import os
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
+UNET_IMAGE_GAIN = 0.1     # noise = 0.1 * image_latent + 0.5 * depth_latent + 1e-4 * t
+UNET_DEPTH_GAIN = 0.5
+UNET_T_GAIN = 1e-4
 
-def make_depth_anything_like(path, fp16=False):
-    """pixel_values [1,3,H,W] -> predicted_depth [1,H,W] (= channel mean, ReLU)."""
-    dt = TensorProto.FLOAT16 if fp16 else TensorProto.FLOAT
-    inp = helper.make_tensor_value_info("pixel_values", dt, [1, 3, "h", "w"])
-    out = helper.make_tensor_value_info("predicted_depth", dt, [1, "h", "w"])
-    nodes = [
-        # opset 13: ReduceMean takes axes as an attribute
-        helper.make_node("ReduceMean", ["pixel_values"], ["m"], axes=[1], keepdims=0),
-        helper.make_node("Relu", ["m"], ["predicted_depth"]),
-    ]
-    graph = helper.make_graph(nodes, "fake_da2", [inp], [out])
+
+def _save(graph, path):
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 8
     onnx.checker.check_model(model)
     onnx.save(model, path)
 
 
-def make_moge_like(path, affine_points, mask, metric_scale):
-    """image [1,3,H,W] + num_tokens -> constant points/normal/mask/metric_scale.
+def _const(name, arr):
+    return helper.make_node("Constant", [], [name], value=numpy_helper.from_array(np.asarray(arr), name + "_v"))
 
-    The outputs ignore the input and return a precomputed affine point map,
-    so the test can check focal/shift recovery end to end.
-    """
-    h, w = affine_points.shape[:2]
-    image = helper.make_tensor_value_info("image", TensorProto.FLOAT, [1, 3, "h", "w"])
-    tokens = helper.make_tensor_value_info("num_tokens", TensorProto.INT64, [])
-    outs = [
-        helper.make_tensor_value_info("points", TensorProto.FLOAT, [1, h, w, 3]),
-        helper.make_tensor_value_info("normal", TensorProto.FLOAT, [1, h, w, 3]),
-        helper.make_tensor_value_info("mask", TensorProto.FLOAT, [1, h, w]),
-        helper.make_tensor_value_info("metric_scale", TensorProto.FLOAT, [1]),
-    ]
-    consts = {
-        "points": affine_points[None].astype(np.float32),
-        "normal": np.zeros((1, h, w, 3), np.float32),
-        "mask": mask[None].astype(np.float32),
-        "metric_scale": np.array([metric_scale], np.float32),
+
+def zero_snr_trailing_config():
+    """marigold.json for an SD2-style zero-SNR, v-prediction, trailing DDIM (computed in NumPy)."""
+    betas = np.linspace(0.00085 ** 0.5, 0.012 ** 0.5, 1000, dtype=np.float64) ** 2
+    ac = np.cumprod(1.0 - betas)
+    s = np.sqrt(ac)
+    s0, sT = s[0], s[-1]
+    s = (s - sT) * s0 / (s0 - sT)
+    ac = s ** 2
+    alphas = np.concatenate([ac[:1], ac[1:] / ac[:-1]])
+    ac = np.cumprod(alphas)
+    return {
+        "format": 1, "model": "fake", "scaling_factor": 0.18215, "num_train_timesteps": 1000,
+        "timestep_spacing": "trailing", "steps_offset": 1, "prediction_type": "v_prediction",
+        "alphas_cumprod": ac.tolist(), "final_alpha_cumprod": float(ac[0]),
+        "default_denoising_steps": 1, "default_processing_resolution": 64, "license": "test",
     }
+
+
+def make_marigold_like(folder, cfg=None):
+    """Write vae_encoder/unet/vae_decoder.onnx + marigold.json into ``folder``."""
+    os.makedirs(folder, exist_ok=True)
+
+    # encoder: 8x8 average pool -> RGB means + their channel mean = 4 latent channels
+    image = helper.make_tensor_value_info("image", TensorProto.FLOAT, [None, 3, None, None])
+    latent = helper.make_tensor_value_info("latent", TensorProto.FLOAT, [None, 4, None, None])
     nodes = [
-        helper.make_node("Constant", [], [name], value=numpy_helper.from_array(arr, name + "_v"))
-        for name, arr in consts.items()
+        helper.make_node("AveragePool", ["image"], ["p"], kernel_shape=[8, 8], strides=[8, 8]),
+        helper.make_node("ReduceMean", ["p"], ["m"], axes=[1], keepdims=1),
+        helper.make_node("Concat", ["p", "m"], ["latent"], axis=1),
     ]
-    graph = helper.make_graph(nodes, "fake_moge2", [image, tokens], outs)
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-    model.ir_version = 8
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
+    _save(helper.make_graph(nodes, "fake_vae_encoder", [image], [latent]),
+          os.path.join(folder, "vae_encoder.onnx"))
 
-
-def make_illustrators_depth_like(path, size=1536, outlier=True):
-    """image [1,3,S,S] in [-1,1] -> layer_depth [1,1,S,S] = channel mean (+ outlier).
-
-    Same names/shapes as tools/export_illustrators_depth_onnx.py produces. The
-    real head's -1/clamp(...) can saturate at -1e4; one planted pixel mimics
-    that so the add-on's outlier clipping is exercised.
-    """
-    image = helper.make_tensor_value_info("image", TensorProto.FLOAT, [1, 3, size, size])
-    out = helper.make_tensor_value_info("layer_depth", TensorProto.FLOAT, [1, 1, size, size])
-    spike = np.zeros((1, 1, size, size), np.float32)
-    if outlier:
-        spike[0, 0, 0, 0] = -1e4
+    # unet: linear in both latents and the timestep, so tests can replay it exactly
+    sample = helper.make_tensor_value_info("sample", TensorProto.FLOAT, [None, 8, None, None])
+    timestep = helper.make_tensor_value_info("timestep", TensorProto.INT64, [1])
+    noise = helper.make_tensor_value_info("noise", TensorProto.FLOAT, [None, 4, None, None])
     nodes = [
-        helper.make_node("ReduceMean", ["image"], ["m"], axes=[1], keepdims=1),
-        helper.make_node("Constant", [], ["spike"], value=numpy_helper.from_array(spike, "spike_v")),
-        helper.make_node("Add", ["m", "spike"], ["layer_depth"]),
+        _const("split", np.array([4, 4], np.int64)),
+        helper.make_node("Split", ["sample", "split"], ["img", "dep"], axis=1),
+        _const("gi", np.float32(UNET_IMAGE_GAIN)), _const("gd", np.float32(UNET_DEPTH_GAIN)),
+        _const("gt", np.float32(UNET_T_GAIN)),
+        helper.make_node("Mul", ["img", "gi"], ["a"]),
+        helper.make_node("Mul", ["dep", "gd"], ["b"]),
+        helper.make_node("Cast", ["timestep"], ["tf"], to=TensorProto.FLOAT),
+        helper.make_node("Mul", ["tf", "gt"], ["c"]),
+        helper.make_node("Add", ["a", "b"], ["ab"]),
+        helper.make_node("Add", ["ab", "c"], ["noise"]),
     ]
-    graph = helper.make_graph(nodes, "fake_illustrators_depth", [image], [out])
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-    model.ir_version = 8
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
+    _save(helper.make_graph(nodes, "fake_unet", [sample, timestep], [noise]),
+          os.path.join(folder, "unet.onnx"))
+
+    # decoder: channel mean -> x8 nearest upsample -> sigmoid (always in [0, 1])
+    latent_in = helper.make_tensor_value_info("latent", TensorProto.FLOAT, [None, 4, None, None])
+    depth = helper.make_tensor_value_info("depth", TensorProto.FLOAT, [None, 1, None, None])
+    nodes = [
+        helper.make_node("ReduceMean", ["latent"], ["m"], axes=[1], keepdims=1),
+        _const("roi", np.array([], np.float32)),
+        _const("scales", np.array([1, 1, 8, 8], np.float32)),
+        helper.make_node("Resize", ["m", "roi", "scales"], ["u"], mode="nearest"),
+        helper.make_node("Sigmoid", ["u"], ["depth"]),
+    ]
+    _save(helper.make_graph(nodes, "fake_vae_decoder", [latent_in], [depth]),
+          os.path.join(folder, "vae_decoder.onnx"))
+
+    with open(os.path.join(folder, "marigold.json"), "w", encoding="utf-8") as fh:
+        json.dump(cfg or zero_snr_trailing_config(), fh)
+    return folder
+
+
+def fake_reference(image_nchw, lat, steps, cfg):
+    """NumPy replay of the fake graphs + DDIM for one ensemble member."""
+    from depth_scene.core.ddim import DDIM
+
+    b, c, h, w = image_nchw.shape
+    p = image_nchw.reshape(b, c, h // 8, 8, w // 8, 8).mean(axis=(3, 5))
+    img_lat = np.concatenate([p, p.mean(axis=1, keepdims=True)], axis=1)
+    sched = DDIM.from_config(cfg)
+    for t in sched.timesteps(steps):
+        noise = UNET_IMAGE_GAIN * img_lat + UNET_DEPTH_GAIN * lat + UNET_T_GAIN * t
+        lat = sched.step(noise, t, lat)
+    m = lat.mean(axis=1)[0]
+    up = np.repeat(np.repeat(m, 8, axis=0), 8, axis=1)
+    return 1.0 / (1.0 + np.exp(-up))

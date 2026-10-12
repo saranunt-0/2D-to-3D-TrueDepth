@@ -10,7 +10,7 @@ import bpy
 from bpy.props import EnumProperty, StringProperty
 
 from . import paths
-from .ai import download, models, runtime
+from .ai import marigold, models, runtime
 
 ORT_VARIANTS = [
     ("cpu", "CPU (all platforms)", "onnxruntime - CPU everywhere, CoreML GPU on macOS", 0),
@@ -104,35 +104,10 @@ class DEPTHSCENE_OT_install_ort(_ThreadJobMixin, bpy.types.Operator):
         return self._start(context, key, work)
 
 
-class DEPTHSCENE_OT_download_model(_ThreadJobMixin, bpy.types.Operator):
-    bl_idname = "depth_scene.download_model"
-    bl_label = "Download Model"
-    bl_description = "Download the ONNX model file from Hugging Face"
-
-    model: StringProperty()
-    precision: StringProperty(default="fp32")
-
-    def execute(self, context):
-        info = models.get(self.model)
-        dest = paths.model_path(info, self.precision)
-        key = f"dl:{info.key}:{self.precision}"
-        if key in _jobs:
-            return {"CANCELLED"}
-        job = download.Download(info.url(self.precision), dest)
-        _jobs[key] = {"job": job, "message": f"Downloaded {info.label}"}
-
-        def work():
-            job.run()
-            if job.error:
-                _jobs[key]["error"] = f"Download failed ({job.error}). You can download {info.url(self.precision)} manually into {paths.models_dir()}"
-
-        return self._start(context, key, work)
-
-
 class DEPTHSCENE_OT_delete_model(bpy.types.Operator):
     bl_idname = "depth_scene.delete_model"
     bl_label = "Delete Model"
-    bl_description = "Delete the downloaded model file"
+    bl_description = "Delete the converted model folder"
     bl_options = {"INTERNAL"}
 
     model: StringProperty()
@@ -141,15 +116,9 @@ class DEPTHSCENE_OT_delete_model(bpy.types.Operator):
     def execute(self, context):
         runtime.clear_sessions()
         path = paths.model_path(models.get(self.model), self.precision)
-        for p in (path, path + ".data"):    # big models keep weights in a .data sidecar
-            if os.path.exists(p):
-                os.remove(p)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
         return {"FINISHED"}
-
-
-def download_progress(key):
-    job = _jobs.get(key, {}).get("job")
-    return None if job is None else job.progress
 
 
 class DepthScenePreferences(bpy.types.AddonPreferences):
@@ -182,29 +151,23 @@ class DepthScenePreferences(bpy.types.AddonPreferences):
         box.prop(self, "models_dir")
         for info in models.MODELS.values():
             for precision in info.files:
+                folder = paths.model_path(info, precision)
+                ok = os.path.isdir(folder) and not marigold.missing_files(folder)
                 row = box.row(align=True)
-                label = f"{info.label}  [{precision}, ~{info.size_mb(precision)} MB, {info.license_id}]"
-                row.label(text=label, icon="CHECKMARK" if os.path.exists(paths.model_path(info, precision)) else "BLANK1")
-                key = f"dl:{info.key}:{precision}"
-                prog = download_progress(key)
-                if prog is not None:
-                    row.label(text=f"{prog * 100:.0f}%")
-                elif os.path.exists(paths.model_path(info, precision)):
+                row.label(text=f"{info.label}  [{precision}, ~{info.size_mb(precision)} MB]",
+                          icon="CHECKMARK" if ok else "BLANK1")
+                if os.path.isdir(folder):
                     op = row.operator(DEPTHSCENE_OT_delete_model.bl_idname, text="", icon="TRASH")
                     op.model, op.precision = info.key, precision
-                elif info.url(precision) is None:
-                    row.label(text=f"manual: {info.filename(precision)}")
                 else:
-                    op = row.operator(DEPTHSCENE_OT_download_model.bl_idname, text="Download", icon="URL")
-                    op.model, op.precision = info.key, precision
+                    row.label(text=f"convert into: {info.filename(precision)}/")
         col = box.column(align=True)
-        col.label(text="Depth Anything V2 Base/Large weights are CC-BY-NC-4.0: non-commercial use only.", icon="INFO")
-        col.label(text="Small (Apache-2.0) and MoGe-2 (MIT) are fine for commercial work.")
-        col.label(text="Illustrator's Depth: Adobe Research licence - academic research/teaching only.", icon="ERROR")
-        col.label(text="Convert it with tools/export_illustrators_depth_onnx.py (see README).")
+        col.label(text="Marigold weights: CreativeML Open RAIL++-M - commercial use allowed,", icon="INFO")
+        col.label(text="but use-based restrictions apply and must be passed on if you redistribute.")
+        col.label(text="Convert prs-eth/marigold-depth-v1-1 with tools/export_marigold_onnx.py (see README).")
 
 
-classes = (DEPTHSCENE_OT_install_ort, DEPTHSCENE_OT_download_model, DEPTHSCENE_OT_delete_model, DepthScenePreferences)
+classes = (DEPTHSCENE_OT_install_ort, DEPTHSCENE_OT_delete_model, DepthScenePreferences)
 
 
 def register():

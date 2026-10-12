@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
-from synthetic import camera_points, corridor_image  # noqa: E402
+from synthetic import corridor_image  # noqa: E402
 
 FOV = math.radians(65.0)
 W, H = 320, 240
@@ -138,51 +138,38 @@ def test_inverse_mapping_from_disparity_matches_metric(addon):
     assert end.sum() > 20
 
 
-def test_ai_generation_with_depth_anything_signature(addon):
+def test_marigold_generation_and_linear_build(addon):
     from depth_scene import paths
     from depth_scene.ai import models
-    from fake_models import make_depth_anything_like
+    from fake_models import make_marigold_like
 
     pytest.importorskip("onnxruntime")
     pytest.importorskip("onnx")
-    make_depth_anything_like(paths.model_path(models.get("da2_small"), "fp32"))
+    info = models.get(models.DEFAULT_MODEL)
+    make_marigold_like(paths.model_path(info, "fp32"))
     s = bpy.context.scene.depth_scene
     s.use_existing_depth = False
-    s.model = "da2_small"
+    s.model = info.key
     s.precision = "fp32"
     s.device = "CPU"
-    s.input_size = 266
+    s.input_size = 128
+    s.denoise_steps = 2
+    s.ensemble_size = 2
+    s.seed = 3
     assert bpy.ops.depth_scene.generate_depth() == {"FINISHED"}
-    assert s.existing_depth is not None and s.existing_kind == "disparity"
+    assert s.existing_depth is not None and s.existing_kind == "depth"
+    assert tuple(s.existing_depth.size) == (128, 96)            # 320x240 -> longest edge 128
     assert os.path.exists(bpy.path.abspath(s.existing_depth.filepath_raw))
-    # Build reuses the depth generated above (same signature).
+    # Build reuses the depth generated above (same signature) and maps it LINEAR (0 = near).
     name = s.existing_depth.name
     assert bpy.ops.depth_scene.build() == {"FINISHED"}
-    assert bpy.context.active_object.depth_scene.depth_image.name == name
-
-
-def test_ai_generation_with_moge_signature_sets_fov(addon):
-    from depth_scene import paths
-    from depth_scene.ai import models
-    from fake_models import make_moge_like
-
-    pytest.importorskip("onnxruntime")
-    pytest.importorskip("onnx")
-    fov = math.radians(72.0)
-    w, h = 96, 72
-    from synthetic import corridor_depth
-    depth, _ = corridor_depth(w, h, fov)
-    gt = camera_points(depth, fov)
-    cv = np.stack([gt[..., 0], -gt[..., 1], -gt[..., 2]], axis=-1) / 2.0
-    cv[..., 2] -= 0.5
-    make_moge_like(paths.model_path(models.get("moge2_vits"), "fp32"), cv, np.ones((h, w)), 2.0)
-    s = bpy.context.scene.depth_scene
-    s.model = "moge2_vits"
-    assert bpy.ops.depth_scene.build() == {"FINISHED"}
     o = bpy.context.active_object.depth_scene
-    assert o.depth_kind == "metric" and o.mapping == "METRIC"
-    assert math.degrees(o.estimated_fov) == pytest.approx(72.0, abs=0.5)
-    assert math.degrees(o.projector.data.angle) == pytest.approx(72.0, abs=0.5)
+    assert o.depth_image.name == name
+    assert o.depth_kind == "depth" and o.mapping == "LINEAR"
+    # Changing a generation setting invalidates the reuse signature.
+    s.seed = 4
+    from depth_scene import builder
+    assert s.existing_depth.get("depth_scene_source") != builder.depth_signature(s, s.image)
 
 
 def test_relief_mode(addon):
@@ -322,48 +309,3 @@ def test_panels_draw_without_errors(addon):
     preferences.DepthScenePreferences.draw(type("P", (), {
         "layout": _Layout(), "ort_variant": prefs.ort_variant, "models_dir": prefs.models_dir,
         "bl_rna": prefs.bl_rna})(), bpy.context)
-
-
-def test_download_class_with_file_url(tmp_path):
-    from depth_scene.ai import download
-
-    src = tmp_path / "src.bin"
-    src.write_bytes(os.urandom(3 * 1024 * 1024 + 17))
-    dest = tmp_path / "out" / "model.onnx"
-    job = download.Download(src.as_uri(), str(dest))
-    job.run()
-    assert job.error is None and job.done and job.progress == 1.0
-    assert dest.read_bytes() == src.read_bytes()
-    bad = download.Download((tmp_path / "missing.bin").as_uri(), str(tmp_path / "x.onnx"))
-    bad.run()
-    assert bad.error and not os.path.exists(tmp_path / "x.onnx")
-
-
-def test_illustrators_depth_generation_and_layered_relief(addon):
-    from depth_scene import paths
-    from depth_scene.ai import models
-    from fake_models import make_illustrators_depth_like
-
-    pytest.importorskip("onnxruntime")
-    pytest.importorskip("onnx")
-    make_illustrators_depth_like(paths.model_path(models.get("illustrators_depth"), "fp32"))
-    s = bpy.context.scene.depth_scene
-    s.image = addon["image"]
-    s.use_existing_depth = False
-    s.model = "illustrators_depth"
-    s.precision = "fp32"
-    s.device = "CPU"
-    s.input_blur = 1.0
-    s.mode = "RELIEF"
-    # the panel takes the manual-model branch without errors
-    from depth_scene import ui
-    ui.DEPTHSCENE_PT_main.draw(type("P", (), {"layout": _Layout()})(), bpy.context)
-    assert bpy.ops.depth_scene.build() == {"FINISHED"}
-    obj = bpy.context.active_object
-    o = obj.depth_scene
-    assert o.depth_kind == "layers" and o.mapping == "LINEAR"
-    o.layer_steps = 6
-    co = np.empty(len(obj.data.vertices) * 3, np.float32)
-    obj.data.vertices.foreach_get("co", co)
-    assert len(set(np.round(co.reshape(-1, 3)[:, 2], 4))) <= 6
-    s.model = "da2_small"

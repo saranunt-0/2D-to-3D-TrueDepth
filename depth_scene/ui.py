@@ -1,12 +1,9 @@
 """Sidebar panels (3D Viewport > N panel > Depth Scene)."""
 
-import math
-import os
-
 import bpy
 
 from . import paths
-from .ai import models, runtime
+from .ai import marigold, models, runtime
 from .operators import _active_depth_object
 from .properties import KIND_ITEMS
 
@@ -38,33 +35,22 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
             box.prop(s, "existing_kind")
         else:
             box.prop(s, "model")
-            if s.model == "CUSTOM":
-                box.prop(s, "custom_model_path")
-            else:
-                info = models.get(s.model)
-                if not info.commercial_ok:
-                    box.label(text=f"{info.license_id}: non-commercial use only", icon="ERROR")
-                path = paths.model_path(info, s.precision)
-                if not os.path.exists(path):
-                    if info.url(s.precision) is None:
-                        col = box.column(align=True)
-                        col.alert = True
-                        col.label(text=f"Needs {info.filename(s.precision)} in the models folder", icon="ERROR")
-                        col.label(text="Convert with tools/export_illustrators_depth_onnx.py")
-                    else:
-                        row = box.row()
-                        row.alert = True
-                        op = row.operator("depth_scene.download_model",
-                                          text=f"Download (~{info.size_mb(s.precision)} MB)", icon="URL")
-                        op.model, op.precision = info.key, s.precision if s.precision in info.files else "fp32"
+            info = models.get(s.model)
+            missing = marigold.missing_files(paths.model_path(info, s.precision))
+            if missing:
+                col = box.column(align=True)
+                col.alert = True
+                col.label(text=f"Needs folder {info.filename(s.precision)} in the models folder", icon="ERROR")
+                col.label(text="Convert with tools/export_marigold_onnx.py (see README)")
             row = box.row(align=True)
             row.prop(s, "device", text="")
             row.prop(s, "precision", text="")
-            if s.model == "illustrators_depth":
-                box.prop(s, "input_blur")
-                box.label(text="Fixed 1536 px input; best with Flat Relief + Quantize Layers", icon="INFO")
-            else:
-                box.prop(s, "input_size")
+            col = box.column(align=True)
+            col.prop(s, "input_size")
+            col.prop(s, "denoise_steps")
+            col.prop(s, "ensemble_size")
+            col.prop(s, "seed")
+            box.label(text=f"{info.license_id}: commercial OK, use restrictions apply", icon="INFO")
             box.prop(s, "save_location")
             if runtime.import_ort() is None:
                 box.label(text="Install ONNX Runtime in Preferences > Add-ons", icon="ERROR")
@@ -113,9 +99,6 @@ class DEPTHSCENE_PT_object(_Base, bpy.types.Panel):
         if o.mode == "PERSPECTIVE":
             col = layout.column(align=True)
             col.prop(o, "fov")
-            if o.estimated_fov > 0:
-                col.operator("depth_scene.apply_estimated_fov",
-                             text=f"Use Estimated FOV ({math.degrees(o.estimated_fov):.1f} deg)")
             layout.prop(o, "mapping")
             col = layout.column(align=True)
             if o.mapping == "METRIC":
@@ -140,7 +123,6 @@ class DEPTHSCENE_PT_object(_Base, bpy.types.Panel):
         sub.prop(o, "detail_radius")
         col = layout.column(align=True)
         col.prop(o, "use_alpha")
-        col.prop(o, "remove_masked")
         layout.label(text=f"{o.stat_faces:,} faces, {o.stat_removed:,} stretched removed", icon="INFO")
 
 
