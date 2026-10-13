@@ -1,5 +1,5 @@
 # development_note/index.yaml
-last_updated: "2026-10-12"
+last_updated: "2026-10-13"
 modules:
   - name: depth-estimation
     path: modules/depth-estimation/timeline.md
@@ -12,7 +12,7 @@ modules:
     description: "Extension packaging, preferences (ORT install, downloads), live properties, cameras, UI, bpy tests"
   - name: marigold
     path: modules/marigold/timeline.md
-    description: "Branch marigold: Marigold-only variant, licence analysis, DDIM port, ONNX export"
+    description: "Branch marigold: Marigold-only variant, licence, DDIM port, ONNX export, normals/IID material passes"
 standalone:
   - name: architecture
     path: architecture.md

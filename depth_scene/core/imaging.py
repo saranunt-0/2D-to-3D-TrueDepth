@@ -93,6 +93,11 @@ def linear_to_srgb(x):
     return np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(x, 1.0 / 2.4) - 0.055).astype(np.float32)
 
 
+def srgb_to_linear(x):
+    x = np.clip(np.asarray(x, dtype=np.float32), 0.0, None)
+    return np.where(x <= 0.04045, x / 12.92, np.power((x + 0.055) / 1.055, 2.4)).astype(np.float32)
+
+
 def sample_bilinear(img, u, v):
     """Sample ``img`` at normalised coordinates.
 

@@ -91,6 +91,83 @@ Blender has no SciPy [approximation].
 - [ ] Depth quality on the corridor painting and the illustration.
 - [ ] GPU providers (CUDA / DirectML / CoreML) with the fp16 U-Net.
 
+### 0.5 Material passes: normals and intrinsics (2026-10-13)
+
+Goal: let the rebuilt scene react to Blender lights and shadows, with every
+map toggleable and adjustable.
+
+**Models [fact, prs-eth/Marigold repo + diffusers 0.41 source]:**
+
+| Checkpoint | diffusers pipeline | U-Net in/out channels | Targets (decode → post-processing) |
+|---|---|---|---|
+| `marigold-normals-v1-1` | `MarigoldNormalsPipeline` | 8 / 4 | normals: clip [−1,1] → (z·½+½ if not `use_full_z_range`) → unit length |
+| `marigold-iid-appearance-v1-1` | `MarigoldIntrinsicsPipeline` | 12 / 8 | `albedo` (srgb), `material` = stack [roughness, metallicity, –] (linear) |
+| `marigold-iid-lighting-v1-1` | `MarigoldIntrinsicsPipeline` | 16 / 12 | `albedo` (linear), `shading` (linear, up to scale), `residual` (linear, up to scale) |
+
+* Target properties come from `config/train_marigold_iid_{appearance,lighting}.yaml`.
+  All three use 4 default steps and 768 px; normals and IID decode each
+  target's 4-channel latent separately, then clip and map (x+1)/2 (IID).
+* Normals frame: x right, y up, z towards the observer
+  (`visualize_normals` docstring). Ensemble: "closest" (the member nearest
+  the normalised mean, per pixel). IID ensemble: per-pixel median.
+* Licence: the repo README says "The models are licensed under RAIL++-M" for
+  all checkpoints [fact]. A search snippet of the iid-lighting HF card
+  shows Open RAIL++-M [strong]. The normals / appearance HF cards could not be
+  opened (HF blocked) [unverified].
+* Training domain: IID-Appearance on InteriorVerse, IID-Lighting on
+  Hypersim, both synthetic indoor renders [fact, README]. Quality on
+  paintings / outdoor scenes is [unverified].
+
+**Design decisions:**
+
+* **Normal map in Object space, no conversion [inference, then measured].**
+  The mesh lives in the rig in the projector camera's own frame (camera at
+  the origin looking down −Z, +Y up), so camera-space normals *are*
+  object-space normals. Tangent space would be wrong away from
+  camera-facing planes. Measured in Cycles: ground-truth normal map vs true
+  geometry, mean abs pixel difference 0.0024; X-flipped map 0.50
+  (`test_camera_space_normal_map_matches_geometry_under_a_light`, both
+  Blender versions).
+* **IID-Lighting calibration [inference].** Hypersim's decomposition is
+  linear `I = A·S + R`. Shading and residual are predicted up to scale, so a
+  2-parameter non-negative least-squares fit against the (linearised) input
+  image restores their scale. That makes *Baked Shading* (multiply) and
+  *Baked Highlights* (emission) physically meaningful. The relative RMS of
+  the fit is reported to the user.
+* **Maps stay at processing resolution**; the mesh samples them through
+  image UVs, so no upsampling step is needed.
+* **One pass at a time, one session set cached**: peak memory stays at
+  ~1 U-Net. Each target is decoded at batch 1 for the same reason.
+
+**Validation [measured]:**
+
+* Export parity vs diffusers, identical noise:
+  * tiny random-init models, all four tasks: max |diff| ≤ 5.3e-5 (normals:
+    normalisation amplifies float error where the vector is short; others
+    ≤ 3.4e-6);
+  * full-size IID-Lighting (U-Net 16→12 channels, random weights,
+    384×256, 1 step): **9.6e-6**.
+* CPU cost, 4 cores, 768 px, 1 step:
+  * encoder ~9 s, U-Net ~10 s per step, VAE decoder **~19 s per target**;
+  * IID-Lighting: 101 s at 768 px (incl. first-run warm-up) and 22.5 s at
+    384 px, peak RSS 10.4 GB;
+  * normals ≈ depth, IID-Appearance ≈ +1 decode.
+* `tests/test_export.py` runs the four-task parity in CI when torch +
+  diffusers are installed. Blender tests (4.2.23, 5.2.2) cover pass
+  generation with fake graphs, reuse, per-pass failure isolation, node
+  wiring for every toggle, shadows and Add Light.
+
+**Unverified / follow-ups:**
+
+- [ ] Real normals / IID checkpoints (HF blocked): convert with
+  `--task normals|iid-appearance|iid-lighting --check`.
+- [ ] Quality of IID on the user's corridor painting, NYC illustration and
+  aspen landscape (outside the indoor training domain).
+- [ ] Sharing the VAE-encoder latent across passes would save ~9 s per
+  extra pass at 768 px. This is only valid if the four checkpoints ship
+  byte-identical VAEs (expected, since Marigold freezes the VAE, but not
+  checked).
+
 ## 1. Requirements
 
 1. Runs **inside Blender's bundled Python**, which has NumPy but no
@@ -285,6 +362,7 @@ All on Blender **4.2.23 LTS** (Python 3.11, NumPy 1.26) and **5.2.2 LTS**
 - Marigold code, licences, news: https://github.com/prs-eth/Marigold · weights: https://huggingface.co/prs-eth/marigold-depth-v1-1 · paper: https://arxiv.org/abs/2312.02145
 - diffusers Marigold pipeline (source read for the port): https://github.com/huggingface/diffusers/tree/main/src/diffusers/pipelines/marigold
 - Marigold V2 (Huawei, different model): https://github.com/huawei-bayerlab/marigold-v2
+- Marigold normals / IID checkpoints: https://huggingface.co/prs-eth/marigold-normals-v1-1 · https://huggingface.co/prs-eth/marigold-iid-appearance-v1-1 · https://huggingface.co/prs-eth/marigold-iid-lighting-v1-1 · IID target configs: https://github.com/prs-eth/Marigold/tree/main/config
 
 - Depth Anything V2 README (params, licence, input size 518): https://github.com/DepthAnything/Depth-Anything-V2
 - onnx-community DA2 exports: https://huggingface.co/onnx-community/depth-anything-v2-small · https://huggingface.co/onnx-community/depth-anything-v2-large/tree/main/onnx

@@ -201,3 +201,52 @@ def test_quantized_relief_gives_flat_layers():
     verts, _, _, _ = geo.build(p, ramp, "disparity", (64, 48))
     levels = sorted(set(np.round(verts[:, 2], 5)))
     assert levels == pytest.approx([0.0, 1 / 3, 2 / 3, 1.0], abs=1e-5)
+
+
+# ---------------------------------------------------------------- material passes
+
+def test_srgb_linear_roundtrip():
+    from depth_scene.core import imaging
+
+    x = np.linspace(0, 1, 101, dtype=np.float32)
+    assert np.abs(imaging.linear_to_srgb(imaging.srgb_to_linear(x)) - x).max() < 1e-5
+
+
+def test_lighting_calibration_recovers_scales():
+    from depth_scene.core import passes
+
+    rng = np.random.default_rng(0)
+    albedo = rng.random((20, 30, 3)).astype(np.float32)
+    shading = rng.random((20, 30, 3)).astype(np.float32)
+    residual = rng.random((20, 30, 3)).astype(np.float32) * 0.2
+    image = albedo * shading * 2.5 + residual * 0.4
+    s, r, info = passes.calibrate_lighting(image, albedo, shading, residual)
+    assert info["shading_scale"] == pytest.approx(2.5, rel=1e-4)
+    assert info["residual_scale"] == pytest.approx(0.4, rel=1e-4)
+    assert info["fit_error"] < 1e-5
+    assert np.allclose(albedo * s + r, image, atol=1e-4)
+
+
+def test_lighting_calibration_never_negative():
+    from depth_scene.core import passes
+
+    rng = np.random.default_rng(1)
+    albedo = rng.random((10, 10, 3)).astype(np.float32)
+    shading = rng.random((10, 10, 3)).astype(np.float32)
+    residual = 1.0 - albedo * shading                 # anti-correlated: unconstrained fit gives b < 0
+    image = albedo * shading * 1.5
+    _, _, info = passes.calibrate_lighting(image, albedo, shading, residual)
+    assert info["shading_scale"] >= 0 and info["residual_scale"] >= 0
+
+
+def test_intrinsics_to_maps_converts_srgb_albedo_and_renames():
+    from depth_scene.core import imaging, passes
+
+    alb = np.full((4, 6, 3), 0.5, np.float32)
+    rough = np.full((4, 6), 1.2, np.float32)
+    maps, info = passes.intrinsics_to_maps({"albedo": (alb, "srgb", False), "roughness": (rough, "linear", False),
+                                            "metallicity": (rough * 0, "linear", False)})
+    assert set(maps) == {"albedo", "roughness", "metallic"}
+    assert np.allclose(maps["albedo"], imaging.srgb_to_linear(alb))
+    assert maps["roughness"].max() == 1.0                     # clipped to [0, 1]
+    assert info == {}

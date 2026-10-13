@@ -64,10 +64,24 @@ class DEPTHSCENE_OT_generate_depth(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _run_passes(op, context, obj, progress):
+    """Generate the enabled material passes for ``obj`` and report; never raises."""
+    s = context.scene.depth_scene
+    _cursor(context, "WAIT")
+    results, messages, errors = builder.generate_passes(s, obj.depth_scene.image, progress=progress)
+    builder.assign_passes(obj, results, s.albedo_from)
+    for msg in errors:
+        op.report({"WARNING"}, msg)
+    if results:
+        op.report({"INFO"}, "Material passes: " + "; ".join(messages) + " - add lights to see them")
+    return results, errors
+
+
 class DEPTHSCENE_OT_build(bpy.types.Operator):
     bl_idname = "depth_scene.build"
     bl_label = "Build 3D Scene"
-    bl_description = "Generate depth if needed, then build the 3D mesh, projector and shot cameras"
+    bl_description = ("Generate depth if needed, then build the 3D mesh, projector and shot cameras "
+                      "(and the enabled material passes)")
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -94,14 +108,66 @@ class DEPTHSCENE_OT_build(bpy.types.Operator):
                 depth_img, kind, _ = builder.generate_depth(s, image, progress=progress)
                 s.existing_depth, s.existing_kind = depth_img, kind
             obj = builder.build_scene(context, image, depth_img, kind, s.mode)
+            o = obj.depth_scene
+            self.report({"INFO"}, f"Built '{obj.name}': {o.stat_faces} faces, {o.stat_removed} stretched removed")
+            if builder.enabled_pass_groups(s):
+                _run_passes(self, context, obj, progress)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
             progress.end()
             _cursor(context, "DEFAULT")
-        o = obj.depth_scene
-        self.report({"INFO"}, f"Built '{obj.name}': {o.stat_faces} faces, {o.stat_removed} stretched removed")
+        return {"FINISHED"}
+
+
+class DEPTHSCENE_OT_generate_passes(bpy.types.Operator):
+    bl_idname = "depth_scene.generate_passes"
+    bl_label = "Generate Material Passes"
+    bl_description = ("Run the enabled Marigold normals / intrinsics models on the active Depth Scene "
+                      "object's image and wire the maps into its material")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = _active_depth_object(context)
+        return (obj is not None and obj.depth_scene.image is not None
+                and bool(builder.enabled_pass_groups(context.scene.depth_scene)))
+
+    def execute(self, context):
+        obj = _active_depth_object(context)
+        progress = _Progress(context)
+        try:
+            results, errors = _run_passes(self, context, obj, progress)
+        finally:
+            progress.end()
+            _cursor(context, "DEFAULT")
+        if not results:
+            self.report({"ERROR"}, errors[0] if errors else "No pass generated")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class DEPTHSCENE_OT_add_light(bpy.types.Operator):
+    bl_idname = "depth_scene.add_light"
+    bl_label = "Add Light"
+    bl_description = "Add a light in front of the projector, sized to the scene, to try the lit material"
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: EnumProperty(name="Type", items=[
+        ("POINT", "Point", ""), ("AREA", "Area", ""), ("SPOT", "Spot", ""), ("SUN", "Sun", "")], default="POINT")
+
+    @classmethod
+    def poll(cls, context):
+        obj = _active_depth_object(context)
+        return obj is not None and obj.parent is not None
+
+    def execute(self, context):
+        obj = _active_depth_object(context)
+        light = builder.add_light(obj, self.kind)
+        if obj.depth_scene.shading != "PRINCIPLED":
+            obj.depth_scene.shading = "PRINCIPLED"
+        self.report({"INFO"}, f"Added '{light.name}' (power {light.data.energy:g}) - move it to relight the scene")
         return {"FINISHED"}
 
 
@@ -209,6 +275,8 @@ class DEPTHSCENE_OT_look_through(bpy.types.Operator):
 classes = (
     DEPTHSCENE_OT_generate_depth,
     DEPTHSCENE_OT_build,
+    DEPTHSCENE_OT_generate_passes,
+    DEPTHSCENE_OT_add_light,
     DEPTHSCENE_OT_rebuild,
     DEPTHSCENE_OT_camera_move,
     DEPTHSCENE_OT_reset_shot,

@@ -87,3 +87,16 @@ def corridor_image(width, height, fov, pillar=(-0.9, -0.45, 3.2)):
 
     shade = 1.0 / (1.0 + 0.04 * z)
     return np.clip(rgb * shade[..., None], 0, 1), depth
+
+
+def corridor_normals(plane):
+    """Camera-space unit normals (x right, y up, z towards the camera) for ``corridor_depth``'s plane ids."""
+    table = np.array([
+        [-1, 0, 0],      # right wall faces left
+        [1, 0, 0],       # left wall faces right
+        [0, 1, 0],       # floor faces up
+        [0, -1, 0],      # ceiling faces down
+        [0, 0, 1],       # end wall faces the camera
+        [0, 0, 1],       # pillar front faces the camera
+    ], np.float32)
+    return table[plane]

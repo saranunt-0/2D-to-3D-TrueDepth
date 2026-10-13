@@ -12,17 +12,23 @@ pytest.importorskip("onnx")
 
 from depth_scene.ai import infer, marigold, models, runtime  # noqa: E402
 from depth_scene.core.ddim import DDIM  # noqa: E402
-from fake_models import fake_reference, make_marigold_like, zero_snr_trailing_config  # noqa: E402
+from fake_models import (fake_decoded, fake_reference, make_marigold_like,  # noqa: E402
+                         zero_snr_trailing_config)
 
 
 def test_registry_is_marigold_only_and_licence_flagged():
-    assert list(models.MODELS) == ["marigold_depth_v1_1"]
+    assert list(models.MODELS) == ["marigold_depth_v1_1", "marigold_normals_v1_1",
+                                   "marigold_iid_appearance_v1_1", "marigold_iid_lighting_v1_1"]
+    assert list(models.DEPTH_MODELS) == ["marigold_depth_v1_1"]
     info = models.get(models.DEFAULT_MODEL)
-    assert info.family == "marigold" and info.output_kind == "depth"
-    assert info.commercial_ok and "RAIL++-M" in info.license_id
+    assert info.family == "marigold" and info.output_kind == "depth" and info.task == "depth"
     assert info.filename("fp32") == "marigold_depth_v1_1_fp32"
     assert info.filename("fp16") == "marigold_depth_v1_1_fp16"
-    assert "export_marigold_onnx.py" in info.manual
+    for m in models.MODELS.values():
+        assert m.commercial_ok and "RAIL++-M" in m.license_id
+        assert "export_marigold_onnx.py" in m.manual and m.checkpoint in m.manual
+    assert set(models.PASS_MODELS) == {"normals", "appearance", "lighting"}
+    assert models.get(models.PASS_MODELS["appearance"]).outputs == ("albedo", "roughness", "metallic")
 
 
 # ---------------------------------------------------------------- DDIM port (no diffusers needed)
@@ -115,6 +121,96 @@ def test_estimate_end_to_end_with_seed(tmp_path):
     assert a.kind == "depth" and a.depth.shape == (40, 64)
     assert np.array_equal(a.depth, b.depth) and not np.array_equal(a.depth, c.depth)
     assert a.provider == "CPUExecutionProvider"
+
+
+# ---------------------------------------------------------------- normals / intrinsics
+
+def _rgb_and_latents(n_t, seed=10, h=48, w=72):
+    rgb = np.random.default_rng(seed).random((h, w, 3)).astype(np.float32)
+    lat = np.random.default_rng(seed + 1).standard_normal((3, 4 * n_t, h // 8, w // 8)).astype(np.float32)
+    return rgb, lat
+
+
+@pytest.mark.parametrize("full_z", [True, False])
+def test_normals_match_numpy_replay(tmp_path, full_z):
+    folder = make_marigold_like(str(tmp_path / "n"), cfg=None, task="normals")
+    cfg = dict(marigold.load_config(folder), use_full_z_range=full_z)
+    rgb, lat = _rgb_and_latents(1)
+    got = marigold.predict(_sessions(folder), cfg, rgb, steps=2, processing_resolution=0, latents=lat[:1])
+    assert got.shape == (48, 72, 3)
+    n = fake_decoded((rgb * 2 - 1).transpose(2, 0, 1)[None], lat[:1], 2, cfg)[0]
+    if not full_z:
+        n[2] = n[2] * 0.5 + 0.5
+    n = n / np.maximum(np.linalg.norm(n, axis=0, keepdims=True), 1e-6)
+    assert np.abs(got - n.transpose(1, 2, 0)).max() < 1e-5
+    assert np.allclose(np.linalg.norm(got, axis=-1), 1.0, atol=1e-5)
+
+
+def test_normals_ensemble_picks_member_closest_to_mean():
+    up = np.zeros((3, 2, 2), np.float32)
+    up[1] = 1.0
+    tilted = marigold.normalize_normals(up + np.array([0.3, 0, 0], np.float32)[:, None, None])
+    away = np.zeros_like(up)
+    away[0] = 1.0
+    out = marigold.ensemble_normals([away, up, tilted])
+    # mean direction ~ between x and y; tilted (x 0.3, y 1) is closer than pure y or pure x
+    assert np.allclose(out, tilted)
+
+
+@pytest.mark.parametrize("task,names", [("iid-appearance", ["albedo", "material"]),
+                                        ("iid-lighting", ["albedo", "shading", "residual"])])
+def test_intrinsics_match_numpy_replay_and_median(tmp_path, task, names):
+    folder = make_marigold_like(str(tmp_path / task), task=task)
+    cfg = marigold.load_config(folder)
+    n_t = len(names)
+    rgb, lat = _rgb_and_latents(n_t)
+    got = marigold.predict(_sessions(folder), cfg, rgb, steps=1, processing_resolution=0,
+                           ensemble_size=3, latents=lat)
+    assert list(got) == names
+    image = (rgb * 2 - 1).transpose(2, 0, 1)[None]
+    members = [(fake_decoded(image, lat[e:e + 1], 1, cfg) + 1) / 2 for e in range(3)]
+    ref = np.median(np.stack(members), axis=0)
+    for i, name in enumerate(names):
+        assert got[name].shape == (48, 72, 3)
+        assert np.abs(got[name] - ref[i].transpose(1, 2, 0)).max() < 1e-5
+
+
+def test_split_targets_unstacks_material():
+    from fake_models import APPEARANCE_PROPS
+
+    cfg = {"task": "intrinsics", "target_properties": APPEARANCE_PROPS}
+    mat = np.random.default_rng(0).random((4, 5, 3)).astype(np.float32)
+    alb = np.full((4, 5, 3), 0.5, np.float32)
+    out = marigold.split_targets(cfg, {"albedo": alb, "material": mat})
+    assert set(out) == {"albedo", "roughness", "metallicity"}
+    assert out["albedo"][1] == "srgb"
+    assert np.array_equal(out["roughness"][0], mat[..., 0]) and out["roughness"][1] == "linear"
+    assert np.array_equal(out["metallicity"][0], mat[..., 1])
+
+
+def test_estimate_passes_appearance_and_lighting(tmp_path):
+    rgb = np.random.default_rng(12).random((40, 64, 3)).astype(np.float32)
+    kw = dict(device="CPU", processing_resolution=64, steps=2, seed=1)
+    app = models.get(models.PASS_MODELS["appearance"])
+    res = infer.estimate_passes(app, make_marigold_like(str(tmp_path / "a"), task="iid-appearance"), rgb, **kw)
+    assert list(res.maps) == ["albedo", "roughness", "metallic"]
+    assert res.maps["albedo"].shape == (40, 64, 3) and res.maps["roughness"].shape == (40, 64)
+    assert 0.0 <= res.maps["metallic"].min() and res.maps["metallic"].max() <= 1.0
+    lit = models.get(models.PASS_MODELS["lighting"])
+    res = infer.estimate_passes(lit, make_marigold_like(str(tmp_path / "l"), task="iid-lighting"), rgb, **kw)
+    assert list(res.maps) == ["albedo", "shading", "residual"]
+    assert {"shading_scale", "residual_scale", "fit_error"} <= set(res.info)
+    nrm = models.get(models.PASS_MODELS["normals"])
+    res = infer.estimate_passes(nrm, make_marigold_like(str(tmp_path / "n"), task="normals"), rgb, **kw)
+    n = res.maps["normal"] * 2 - 1
+    assert np.allclose(np.linalg.norm(n, axis=-1), 1.0, atol=1e-5)
+
+
+def test_wrong_model_folder_is_rejected(tmp_path):
+    folder = make_marigold_like(str(tmp_path / "d"))                  # a depth export
+    nrm = models.get(models.PASS_MODELS["normals"])
+    with pytest.raises(RuntimeError, match="'depth' model, expected 'normals'"):
+        infer.estimate_passes(nrm, folder, np.zeros((16, 16, 3), np.float32), device="CPU")
 
 
 def test_gpu_request_without_gpu_provider_is_explicit():

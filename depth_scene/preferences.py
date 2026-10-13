@@ -147,7 +147,7 @@ class DepthScenePreferences(bpy.types.AddonPreferences):
             box.label(text="ONNX Runtime not installed - AI depth is disabled (existing depth maps still work)", icon="ERROR")
 
         box = layout.box()
-        box.label(text="Depth models", icon="FILE_3D")
+        box.label(text="Marigold models (depth + optional material passes)", icon="FILE_3D")
         box.prop(self, "models_dir")
         for info in models.MODELS.values():
             for precision in info.files:
@@ -164,7 +164,8 @@ class DepthScenePreferences(bpy.types.AddonPreferences):
         col = box.column(align=True)
         col.label(text="Marigold weights: CreativeML Open RAIL++-M - commercial use allowed,", icon="INFO")
         col.label(text="but use-based restrictions apply and must be passed on if you redistribute.")
-        col.label(text="Convert prs-eth/marigold-depth-v1-1 with tools/export_marigold_onnx.py (see README).")
+        col.label(text="Convert each prs-eth/marigold-*-v1-1 checkpoint with tools/export_marigold_onnx.py "
+                       "--task depth|normals|iid-appearance|iid-lighting (see README).")
 
 
 classes = (DEPTHSCENE_OT_install_ort, DEPTHSCENE_OT_delete_model, DepthScenePreferences)

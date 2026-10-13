@@ -3,6 +3,46 @@
 
 ---
 
+## [2026-10-13] Material passes: normals + intrinsics (lighting & shadows)
+
+**Type**: `feature`
+**Status**: `resolved` (real normals/IID checkpoints unverified)
+
+### Context
+User: Marigold can also predict normals and materials; add them as options so the generated
+scene interacts with lighting and shadows, with maximum control (toggle on/off, adjust).
+
+### Work Done
+- Research: diffusers 0.41 `MarigoldNormalsPipeline` / `MarigoldIntrinsicsPipeline` source,
+  prs-eth/Marigold configs (IID target properties), licence (README: all models RAIL++-M).
+- `ai/marigold.py`: generic task loop (depth / normals / intrinsics), T target latents,
+  per-target decode at batch 1, normals "closest" ensemble, IID median, `split_targets`.
+- `ai/models.py`: normals, iid-appearance, iid-lighting entries; `DEPTH_MODELS`, `PASS_MODELS`.
+- `core/passes.py`: normal encoding, sRGB->linear albedo, non-negative LSQ calibration of
+  shading/residual (`I = A*S + R`).
+- `tools/export_marigold_onnx.py`: `--task`, rgb decoder graph, task fields in marigold.json,
+  `--tiny` random-init; `export_folder`/`check` reusable from tests.
+- Blender: Scene toggles (3 passes + albedo source), Build runs passes, "Generate for Active
+  Object", per-object maps + 20 live material parameters, Lights & Shadows panel (Cast
+  Shadows, Original Lighting, Add Light Point/Area/Spot/Sun).
+
+### Checklist
+- [x] Export parity vs diffusers, tiny models, 4 tasks: max |diff| <= 5.3e-5
+- [x] Full-size IID-Lighting (random weights): 9.6e-6; 768 px 101 s, 384 px 22.5 s, 10.4 GB
+- [x] Normal-map convention: Cycles render GT normals vs geometry 0.0024, flipped X 0.50
+- [x] 54 tests pass on Blender 4.2.23 and 5.2.2 (+5 torch-only tests in the torch venv)
+- [ ] Real checkpoints / quality on the user's images (HF blocked)
+
+### Debug notes
+- Blender test failed once on test-order leakage (previous test set `use_albedo=False`);
+  reset explicitly in the passes test.
+
+### Assumptions Made
+- Normals/appearance HF cards carry the same RAIL++-M licence as the repo README states.
+- IID quality outside indoor scenes is unknown; sliders allow backing off.
+
+---
+
 ## [2026-10-12] Marigold-only branch
 
 **Type**: `feature`

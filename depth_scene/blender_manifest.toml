@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "depth_scene"
-version = "0.1.0"
+version = "0.2.0"
 name = "Depth Scene (Marigold)"
-tagline = "Turn one image into a 3D scene with Marigold AI depth"
+tagline = "Image to 3D scene with Marigold depth, normals and materials"
 maintainer = "saranunt-0"
 type = "add-on"
 website = "https://github.com/saranunt-0/2D-to-3D-TrueDepth"

@@ -2,12 +2,23 @@
 
 import bpy
 
-from . import paths
+from . import builder, paths
 from .ai import marigold, models, runtime
 from .operators import _active_depth_object
 from .properties import KIND_ITEMS
 
 KIND_LABELS = {k: n for k, n, _ in KIND_ITEMS}
+PASS_PROPS = (("normals", "pass_normals"), ("appearance", "pass_appearance"), ("lighting", "pass_lighting"))
+
+
+def _missing_model_warning(layout, info, precision):
+    if marigold.missing_files(paths.model_path(info, precision)):
+        col = layout.column(align=True)
+        col.alert = True
+        col.label(text=f"Needs folder {info.filename(precision)} in the models folder", icon="ERROR")
+        col.label(text=f"Convert with tools/export_marigold_onnx.py --task {info.export_task}")
+        return True
+    return False
 
 
 class _Base:
@@ -36,12 +47,7 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
         else:
             box.prop(s, "model")
             info = models.get(s.model)
-            missing = marigold.missing_files(paths.model_path(info, s.precision))
-            if missing:
-                col = box.column(align=True)
-                col.alert = True
-                col.label(text=f"Needs folder {info.filename(s.precision)} in the models folder", icon="ERROR")
-                col.label(text="Convert with tools/export_marigold_onnx.py (see README)")
+            _missing_model_warning(box, info, s.precision)
             row = box.row(align=True)
             row.prop(s, "device", text="")
             row.prop(s, "precision", text="")
@@ -60,7 +66,22 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
                           icon="CHECKMARK")
 
         box = layout.box()
-        box.label(text="3. Build", icon="SCENE_DATA")
+        box.label(text="3. Material Passes (optional)", icon="MATERIAL")
+        col = box.column(align=True)
+        for group, prop in PASS_PROPS:
+            col.prop(s, prop)
+            if getattr(s, prop):
+                _missing_model_warning(col, models.get(models.PASS_MODELS[group]), s.precision)
+        if s.pass_appearance and s.pass_lighting:
+            box.prop(s, "albedo_from")
+        if builder.enabled_pass_groups(s):
+            col = box.column(align=True)
+            col.label(text="Uses the depth settings above (resolution, steps,", icon="INFO")
+            col.label(text="ensemble, seed); each pass ~ one depth run. Build runs them too.")
+            box.operator("depth_scene.generate_passes", text="Generate for Active Object", icon="NODE_MATERIAL")
+
+        box = layout.box()
+        box.label(text="4. Build", icon="SCENE_DATA")
         box.row().prop(s, "mode", expand=True)
         col = box.column(align=True)
         col.prop(s, "set_render_size")
@@ -126,6 +147,18 @@ class DEPTHSCENE_PT_object(_Base, bpy.types.Panel):
         layout.label(text=f"{o.stat_faces:,} faces, {o.stat_removed:,} stretched removed", icon="INFO")
 
 
+def _map_section(layout, o, toggle, image_prop, hint):
+    """Header toggle + map picker; returns a column for the parameters (greyed out when off)."""
+    box = layout.box()
+    box.prop(o, toggle)
+    col = box.column()
+    col.active = getattr(o, toggle)
+    col.prop(o, image_prop, text="Map")
+    if getattr(o, image_prop) is None:
+        col.label(text=hint, icon="INFO")
+    return col
+
+
 class DEPTHSCENE_PT_material(_Base, bpy.types.Panel):
     bl_label = "Material"
     bl_parent_id = "DEPTHSCENE_PT_main"
@@ -138,11 +171,68 @@ class DEPTHSCENE_PT_material(_Base, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
+        layout.use_property_decorate = False
         o = _active_depth_object(context).depth_scene
         layout.prop(o, "shading")
+        if o.shading != "PRINCIPLED":
+            layout.label(text="Switch to Principled to use lights, shadows and passes", icon="INFO")
+            return
+
+        col = _map_section(layout, o, "use_albedo", "albedo_map", "Generate Albedo / Roughness / Metallic")
+        col.prop(o, "albedo_mix")
+        col.prop(o, "albedo_gain")
+        col = _map_section(layout, o, "use_shading", "shading_map", "Generate Shading / Highlights")
+        col.prop(o, "shading_strength")
+
+        col = _map_section(layout, o, "use_normal_map", "normal_map", "Generate the Normal Map pass")
+        col.prop(o, "normal_space")
+        col.prop(o, "normal_strength")
+        row = col.row(align=True)
+        row.prop(o, "normal_flip_x", toggle=True)
+        row.prop(o, "normal_flip_y", toggle=True)
+        layout.prop(o, "bump")
+
+        col = _map_section(layout, o, "use_roughness_map", "roughness_map", "Generate Albedo / Roughness / Metallic")
+        if o.use_roughness_map and o.roughness_map is not None:
+            sub = col.column(align=True)
+            sub.prop(o, "roughness_min")
+            sub.prop(o, "roughness_max")
+        else:
+            layout.prop(o, "roughness")
+        col = _map_section(layout, o, "use_metallic_map", "metallic_map", "Generate Albedo / Roughness / Metallic")
+        if o.use_metallic_map and o.metallic_map is not None:
+            col.prop(o, "metallic_strength")
+        else:
+            layout.prop(o, "metallic")
+
+        col = _map_section(layout, o, "use_residual", "residual_map", "Generate Shading / Highlights")
+        col.prop(o, "residual_strength")
+
+
+class DEPTHSCENE_PT_lighting(_Base, bpy.types.Panel):
+    bl_label = "Lights & Shadows"
+    bl_parent_id = "DEPTHSCENE_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_depth_object(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        o = _active_depth_object(context).depth_scene
+        layout.prop(o, "cast_shadows")
         row = layout.row()
         row.active = o.shading == "PRINCIPLED"
-        row.prop(o, "bump")
+        row.prop(o, "original_light")
+        layout.use_property_split = False
+        row = layout.row(align=True)
+        for kind, icon in (("POINT", "LIGHT_POINT"), ("AREA", "LIGHT_AREA"), ("SPOT", "LIGHT_SPOT"),
+                           ("SUN", "LIGHT_SUN")):
+            row.operator("depth_scene.add_light", text=kind.title(), icon=icon).kind = kind
+        layout.label(text="Lights are parented to the rig, in front of the projector.", icon="INFO")
 
 
 class DEPTHSCENE_PT_camera(_Base, bpy.types.Panel):
@@ -163,7 +253,8 @@ class DEPTHSCENE_PT_camera(_Base, bpy.types.Panel):
         layout.label(text="Animate the Shot camera; keep the Projector fixed.", icon="INFO")
 
 
-classes = (DEPTHSCENE_PT_main, DEPTHSCENE_PT_object, DEPTHSCENE_PT_material, DEPTHSCENE_PT_camera)
+classes = (DEPTHSCENE_PT_main, DEPTHSCENE_PT_object, DEPTHSCENE_PT_material, DEPTHSCENE_PT_lighting,
+           DEPTHSCENE_PT_camera)
 
 
 def register():

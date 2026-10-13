@@ -259,6 +259,150 @@ def test_render_through_projector_reproduces_image(addon):
     assert np.mean(err < 0.06) > 0.9
 
 
+def _render(scene, path):
+    scene.render.filepath = path
+    bpy.ops.render.render(write_still=True)
+    img = bpy.data.images.load(path, check_existing=False)
+    w, h = img.size
+    buf = np.empty(w * h * img.channels, np.float32)
+    img.pixels.foreach_get(buf)
+    out = buf.reshape(h, w, img.channels)[::-1, :, :3].copy()
+    bpy.data.images.remove(img)
+    return out
+
+
+def test_camera_space_normal_map_matches_geometry_under_a_light(addon):
+    """Decisive convention check: a ground-truth camera-space normal map, applied as the add-on
+    wires it (Object space), shades like the true geometry; flipping X does not."""
+    from depth_scene import bimage
+    from depth_scene.core import passes
+    from synthetic import corridor_depth, corridor_normals
+
+    obj = bpy.context.active_object            # projector-alignment scene from the previous test
+    o = obj.depth_scene
+    _, plane = corridor_depth(W, H, FOV, pillar=(-0.9, -0.45, 3.2))
+    gt = bimage.write_map("gt_normal", passes.normal_to_color(corridor_normals(plane)), str(addon["tmp"]), True)
+    o.live_update = False
+    o.remove_stretched = True
+    o.live_update = True
+    o.shading = "PRINCIPLED"
+    o.use_albedo = False
+    assert bpy.ops.depth_scene.add_light(kind="POINT") == {"FINISHED"}
+    light = [ob for ob in bpy.data.objects if ob.type == "LIGHT"][-1]
+    assert light.parent == obj.parent and light.location.z < 0          # in front of the projector
+    assert light.data.energy > 0
+
+    scene = bpy.context.scene
+    scene.camera = o.projector
+    scene.cycles.samples = 16
+    scene.cycles.seed = 0
+    scene.render.resolution_percentage = 50
+    o.use_normal_map = False
+    mesh = _render(scene, str(addon["tmp"] / "lit_mesh.png"))
+    o.normal_map = gt
+    o.use_normal_map = True
+    nodes = {n.bl_idname: n for n in o.material.node_tree.nodes}
+    assert nodes["ShaderNodeNormalMap"].space == "OBJECT"
+    mapped = _render(scene, str(addon["tmp"] / "lit_normal_map.png"))
+    o.normal_flip_x = True
+    flipped = _render(scene, str(addon["tmp"] / "lit_flipped.png"))
+    o.normal_flip_x = False
+    lit = mesh.mean(axis=2) > 0.02                                      # ignore holes / unlit pixels
+    good = np.abs(mapped - mesh).mean(axis=2)[lit].mean()
+    bad = np.abs(flipped - mesh).mean(axis=2)[lit].mean()
+    assert lit.mean() > 0.5
+    print(f"normal map vs mesh shading: {good:.4f}; flipped X: {bad:.4f}")
+    assert good < 0.35 * bad, (good, bad)
+    for ob in [ob for ob in bpy.data.objects if ob.type == "LIGHT"]:
+        bpy.data.objects.remove(ob)
+
+
+def test_material_passes_generate_wire_and_toggle(addon):
+    from depth_scene import builder, paths
+    from depth_scene.ai import models
+    from fake_models import make_marigold_like
+
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("onnx")
+    s = bpy.context.scene.depth_scene
+    for group in builder.PASS_GROUPS:
+        info = models.get(models.PASS_MODELS[group])
+        make_marigold_like(paths.model_path(info, "fp32"), task=info.export_task)
+    s.precision, s.device, s.input_size, s.denoise_steps, s.ensemble_size, s.seed = "fp32", "CPU", 96, 1, 1, 0
+    s.pass_normals = s.pass_appearance = s.pass_lighting = True
+    s.albedo_from = "APPEARANCE"
+    obj = bpy.context.active_object
+    o = obj.depth_scene
+    o.shading = "EMISSION"
+    o.use_albedo = True                                                 # previous test switched it off
+    assert bpy.ops.depth_scene.generate_passes() == {"FINISHED"}
+    assert o.shading == "PRINCIPLED"
+    for prop in ("normal_map", "albedo_map", "roughness_map", "metallic_map", "shading_map", "residual_map"):
+        img = getattr(o, prop)
+        assert img is not None, prop
+        assert os.path.exists(bpy.path.abspath(img.filepath_raw))
+        assert tuple(img.size) == (96, 72)                                # processing resolution, image aspect
+    assert o.albedo_map["depth_scene_pass_group"] == "appearance"
+    assert o.normal_map.colorspace_settings.name == "Non-Color"
+    assert o.albedo_map.colorspace_settings.name != "Non-Color"
+
+    nt = o.material.node_tree
+    bsdf = next(n for n in nt.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled")
+
+    def src(socket_name):
+        links = bsdf.inputs[socket_name].links
+        return links[0].from_node.bl_idname if links else None
+
+    assert src("Base Color") == "ShaderNodeMix"                         # image -> albedo mix
+    assert src("Roughness") == "ShaderNodeMapRange"
+    assert src("Metallic") == "ShaderNodeMath"
+    assert src("Normal") == "ShaderNodeNormalMap"
+    assert src("Emission Color") is None                               # highlights off by default
+
+    # Toggles and parameters rewire / update the tree live.
+    o.use_residual = True
+    o.residual_strength = 2.0
+    o.use_shading = True
+    o.bump = 0.3
+    o.original_light = 0.25
+    o.normal_space = "TANGENT"
+    nt = o.material.node_tree
+    bsdf = next(n for n in nt.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled")
+    assert src("Emission Color") == "ShaderNodeTexImage"
+    assert bsdf.inputs["Emission Strength"].default_value == pytest.approx(2.0)
+    assert src("Normal") == "ShaderNodeBump"                            # normal map -> bump -> BSDF
+    mixes = [n for n in nt.nodes if n.bl_idname == "ShaderNodeMix"]
+    assert {m.blend_type for m in mixes} == {"MIX", "MULTIPLY"}
+    assert any(n.bl_idname == "ShaderNodeMixShader" for n in nt.nodes)  # original lighting blend
+    assert next(n for n in nt.nodes if n.bl_idname == "ShaderNodeNormalMap").space == "TANGENT"
+    o.use_normal_map = o.use_roughness_map = o.use_metallic_map = o.use_albedo = False
+    o.roughness, o.metallic = 0.3, 0.6
+    nt = o.material.node_tree
+    bsdf = next(n for n in nt.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled")
+    assert not any(n.bl_idname == "ShaderNodeNormalMap" for n in nt.nodes)
+    assert bsdf.inputs["Roughness"].default_value == pytest.approx(0.3)
+    assert bsdf.inputs["Metallic"].default_value == pytest.approx(0.6)
+    o.cast_shadows = False
+    assert obj.visible_shadow is False
+    o.cast_shadows = True
+
+    # Same image + settings: maps are reused (not recomputed); albedo source follows the preference.
+    token = o.normal_map["depth_scene_token"]
+    s.albedo_from = "LIGHTING"
+    assert bpy.ops.depth_scene.generate_passes() == {"FINISHED"}
+    assert o.normal_map["depth_scene_token"] == token
+    assert o.albedo_map["depth_scene_pass_group"] == "lighting"
+
+    # A missing model folder only skips that pass.
+    import shutil
+    shutil.rmtree(paths.model_path(models.get(models.PASS_MODELS["normals"]), "fp32"))
+    s.seed = 5                                                          # force regeneration
+    assert bpy.ops.depth_scene.generate_passes() == {"FINISHED"}
+    assert o.roughness_map["depth_scene_source"].endswith("|5")
+    assert not o.normal_map["depth_scene_source"].endswith("|5")
+    s.pass_normals = s.pass_appearance = s.pass_lighting = False
+
+
 class _Layout:
     """Fake UILayout that validates property names and operator ids."""
 
@@ -294,9 +438,12 @@ def test_panels_draw_without_errors(addon):
 
     obj = bpy.context.active_object
     assert obj.depth_scene.is_depth_scene
-    for mode in ("PERSPECTIVE", "RELIEF"):
+    for mode, shading in (("PERSPECTIVE", "PRINCIPLED"), ("RELIEF", "EMISSION"), ("PERSPECTIVE", "EMISSION")):
         obj.depth_scene.live_update = False
         obj.depth_scene.mode = mode
+        obj.depth_scene.shading = shading
+        bpy.context.scene.depth_scene.pass_appearance = shading == "PRINCIPLED"
+        bpy.context.scene.depth_scene.pass_lighting = shading == "PRINCIPLED"
         for cls in ui.classes:
             fake = type("P", (), {"layout": _Layout()})()
             if hasattr(cls, "poll"):
