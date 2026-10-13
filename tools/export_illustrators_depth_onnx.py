@@ -15,7 +15,8 @@ once to ONNX on a machine where the authors' environment is installed:
 This writes ``illustrators_depth_fp32.onnx`` + ``illustrators_depth_fp32.onnx.data``
 (~2.5 GB of weights; ONNX keeps tensors > 2 GB in an external file). Copy BOTH
 files into the add-on's models folder (Preferences > Add-ons > Depth Scene).
-``--fp16`` additionally writes ``illustrators_depth_fp16.onnx`` (~1.3 GB, for GPUs).
+``--fp16`` additionally writes ``illustrators_depth_fp16.onnx`` (~1.3 GB). It is
+only worth using on a GPU: on CPU it is no faster and peaks at ~10 GB RAM.
 
 LICENCE: the weights are under the Adobe Research License - noncommercial
 research purposes only (academic research and teaching). The exported ONNX
@@ -29,6 +30,7 @@ measure speed without the checkpoint; its output is meaningless.
 
 import argparse
 import dataclasses
+import gc
 import sys
 import time
 from pathlib import Path
@@ -73,6 +75,10 @@ def random_init():
     cfg = dataclasses.replace(DEFAULT_MONODEPTH_CONFIG_DICT, checkpoint_uri=None,
                               use_fov_head=False, fov_encoder_preset=None)
     dp, _ = depth_pro.create_model_and_transforms(config=cfg)
+    # Depth Pro zero-initialises the last bias; with random weights the final
+    # ReLU is then ~all zero and every pixel saturates the clamp, which would
+    # make --check meaningless. A positive bias keeps the output varied.
+    dp.head[4].bias.data.fill_(1.0)
     return LayerDepthNet(dp.encoder, dp.decoder, dp.head)
 
 
@@ -105,30 +111,58 @@ def to_fp16(fp32_path, out_path):
     import onnx
     from onnxconverter_common import float16
 
-    model = onnx.load(str(fp32_path), load_external_data=True)
-    model = float16.convert_float_to_float16(model, keep_io_types=True)
+    # The fp32 graph is > 2 GB, so in-memory shape inference (which the
+    # converter runs by default) cannot serialise it. Infer shapes from the
+    # file instead, then convert with the converter's own inference off.
+    fp32_path, out_path = Path(fp32_path), Path(out_path)
+    shaped = fp32_path.with_name(fp32_path.stem + "_shapes.onnx")
+    onnx.shape_inference.infer_shapes_path(str(fp32_path), str(shaped))
+    model = onnx.load(str(shaped), load_external_data=True)
+    shaped.unlink()
+    model = float16.convert_float_to_float16(model, keep_io_types=True, disable_shape_infer=True)
+    # The attention scale is computed from tensor shapes (Shape -> Cast(float)
+    # -> Sqrt). The converter relabels those Cast outputs float16 but leaves
+    # Cast.to = float, which ONNX Runtime rejects; point them at float16.
+    declared = {v.name: v.type.tensor_type.elem_type for v in model.graph.value_info}
+    for node in model.graph.node:
+        if node.op_type == "Cast" and declared.get(node.output[0]) == onnx.TensorProto.FLOAT16:
+            for attr in node.attribute:
+                if attr.name == "to" and attr.i == onnx.TensorProto.FLOAT:
+                    attr.i = onnx.TensorProto.FLOAT16
+    data = out_path.parent / (out_path.name + ".data")
+    for p in (out_path, data):
+        if p.exists():
+            p.unlink()
     onnx.save_model(model, str(out_path), save_as_external_data=True, all_tensors_to_one_file=True,
-                    location=Path(out_path).name + ".data", size_threshold=1024)
+                    location=data.name, size_threshold=1024)
     return out_path
 
 
-def check(net, onnx_path):
-    import onnxruntime as ort
-
-    x = torch.rand(1, 3, SIZE, SIZE) * 2 - 1
+def reference(net, seed=0):
+    """A fixed pseudo-image and the PyTorch output for it."""
+    g = torch.Generator().manual_seed(seed)
+    x = torch.rand(1, 3, SIZE, SIZE, generator=g) * 2 - 1
     t0 = time.perf_counter()
     with torch.no_grad():
         ref = net(x).numpy()
-    t_torch = time.perf_counter() - t0
+    print(f"torch CPU {time.perf_counter() - t0:.1f}s, "
+          f"{np.mean(np.abs(ref) >= 0.99e4) * 100:.2f}% of pixels at the clamp limit")
+    return x.numpy(), ref
+
+
+def check(onnx_path, x, ref):
+    """Per-pixel relative error of ONNX Runtime (CPU) against PyTorch."""
+    import onnxruntime as ort
+
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     t0 = time.perf_counter()
-    got = sess.run(None, {INPUT_NAME: x.numpy()})[0]
+    got = sess.run(None, {INPUT_NAME: x})[0]
     t_ort = time.perf_counter() - t0
-    err = np.abs(got - ref)
-    scale = max(float(np.abs(ref).max()), 1e-6)
-    print(f"output {got.shape}  max|diff| {err.max():.3e}  (rel {err.max() / scale:.3e})")
-    print(f"torch CPU {t_torch:.1f}s   onnxruntime CPU {t_ort:.1f}s")
-    return float(err.max() / scale)
+    rel = np.abs(got - ref) / np.maximum(np.abs(ref), 1e-6)
+    p99, worst = float(np.percentile(rel, 99)), float(rel.max())
+    print(f"{Path(onnx_path).name}: output {got.shape}, rel. error p99 {p99:.2e} max {worst:.2e}, "
+          f"onnxruntime CPU {t_ort:.1f}s")
+    return p99
 
 
 def main():
@@ -154,11 +188,16 @@ def main():
     size = sum(f.stat().st_size for f in fp32.parent.glob(fp32.name + "*")) / 1e9
     print(f"wrote {fp32} (+ .data), {size:.2f} GB, {time.perf_counter() - t0:.0f}s")
     if args.check:
-        check(net, fp32)
+        x, ref = reference(net)
+        check(fp32, x, ref)
+    del net                     # free ~2.6 GB before the fp16 steps
+    gc.collect()
     if args.fp16:
         name = fp32.name.replace("fp32", "fp16") if "fp32" in fp32.name else fp32.stem + "_fp16.onnx"
         fp16 = to_fp16(fp32, fp32.with_name(name))
         print(f"wrote {fp16} (+ .data)")
+        if args.check:
+            check(fp16, x, ref)   # fp16 only pays off on a GPU; on CPU this just checks accuracy
     print("\nCopy the .onnx AND .onnx.data files into the Depth Scene models folder.")
     print("Licence: Adobe Research License - noncommercial research use only.")
 

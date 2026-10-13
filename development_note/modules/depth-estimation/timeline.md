@@ -77,3 +77,28 @@ painting/illustration depth research.
 
 ### Assumptions Made
 - Output sign (front = higher) inferred from GT definition + loss; not observed on real weights.
+
+---
+
+## [2026-10-10] Illustrator's Depth export dry run (real architecture, random weights)
+
+**Type**: `debug`
+**Status**: `resolved`
+
+### Work Done
+- Installed torch 2.8 + timm + Apple ml-depth-pro source; ran
+  `export_illustrators_depth_onnx.py --random-init --check --fp16`.
+- Bug 1: `--check` reported diff 0 - root cause: Depth Pro zero-inits the last head bias, so random
+  weights give an all-zero ReLU -> every pixel saturates the clamp; comparison was vacuous.
+  Fix: dry run sets that bias to 1; check reports per-pixel relative error + saturation %.
+- Bug 2: `--fp16` -> protobuf "Failed to serialize": onnxconverter-common runs in-memory shape
+  inference on a > 2 GB model. Fix: `infer_shapes_path` then convert with disable_shape_infer.
+- Bug 3: fp16 model rejected by ORT (Cast output float vs declared float16) - 96 shape-derived
+  Casts in the attention scale. Fix: retarget Casts whose declared output is float16.
+- Bug 4: fp16 check OOM-killed - torch model + sessions held together. Fix: free the torch model
+  before fp16 steps. fp16 on CPU peaks at 9.9 GB RSS and is not faster -> documented as GPU-only.
+
+### Checklist
+- [x] fp32: rel. error p99 1.2e-7 vs PyTorch, ~75 s/image on 4 CPU cores, 2.58 GB
+- [x] fp16: loads, rank corr 1.0 vs fp32, 1.29 GB
+- [ ] Real checkpoint (Google Drive blocked)

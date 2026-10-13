@@ -9,7 +9,7 @@ Three families, all run with ONNX Runtime (no PyTorch needed):
   of view, which is what perspective reconstruction of a corridor needs.
   MIT licence.
 * Illustrator's Depth (Maruani et al., CVPR 2026) - per-pixel *layer index*
-  for illustrations / flat digital art, built on Apple Depth Pro (~0.64 B
+  for illustrations / flat digital art, built on Apple Depth Pro (648 M
   params, fixed 1536 px input). Weights are under the Adobe Research
   Licence (non-commercial research only) and ship as a PyTorch checkpoint,
   so there is no download URL: users convert it once with
@@ -84,13 +84,13 @@ ILLUSTRATORS_DEPTH = ModelInfo(
     label="Illustrator's Depth (layers, research only)",
     family="illustrators_depth",
     size="Depth Pro (2x ViT-L)",
-    params="~640M",
+    params="648M",
     license_id="Adobe Research (non-commercial research only)",
     commercial_ok=False,
     # No URL: the authors publish a PyTorch checkpoint on Google Drive.
-    files={"fp32": (None, 2550), "fp16": (None, 1280)},
+    files={"fp32": (None, 2580), "fp16": (None, 1290)},   # measured export sizes
     output_kind="layers",
-    description="Layer index for illustrations / flat art, ~640M params, Adobe Research licence",
+    description="Layer index for illustrations / flat art, 648M params, Adobe Research licence",
     manual="Convert the checkpoint with tools/export_illustrators_depth_onnx.py "
            "(see README) and put the .onnx (+ .onnx.data) in the models folder",
 )

@@ -62,7 +62,9 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
             row.prop(s, "precision", text="")
             if s.model == "illustrators_depth":
                 box.prop(s, "input_blur")
-                box.label(text="Fixed 1536 px input; best with Flat Relief + Quantize Layers", icon="INFO")
+                col = box.column(align=True)
+                col.label(text="Fixed 1536 px input; best with Flat Relief + Quantize Layers", icon="INFO")
+                col.label(text="CPU: ~1-2 min and ~10 GB RAM per image; fp16 only helps on GPU")
             else:
                 box.prop(s, "input_size")
             box.prop(s, "save_location")
