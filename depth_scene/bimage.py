@@ -74,6 +74,29 @@ def output_dir(save_location):
     return path
 
 
+def _write_exr(name, rgba, folder, non_color):
+    """Save an (h, w, 4) float array as EXR next to the .blend and load it as an Image."""
+    h, w = rgba.shape[:2]
+    path = os.path.join(folder, bpy.path.clean_name(name) + ".exr")
+    img = bpy.data.images.get(name)
+    if img is not None and tuple(img.size) != (w, h):
+        bpy.data.images.remove(img)
+        img = None
+    if img is None:
+        img = bpy.data.images.new(name, w, h, alpha=True, float_buffer=True)
+    if non_color:
+        img.colorspace_settings.name = "Non-Color"
+    img.alpha_mode = "STRAIGHT"
+    img.pixels.foreach_set(np.ascontiguousarray(rgba[::-1]).ravel())
+    img.filepath_raw = path
+    img.file_format = "OPEN_EXR"
+    img.save()
+    img["depth_scene_token"] = uuid.uuid4().hex
+    img.update()
+    _cache[_key(img)] = rgba
+    return img
+
+
 def write_depth(name, depth, valid, folder):
     """Save depth as a float EXR (R = depth, A = valid) and load it as an Image."""
     h, w = depth.shape
@@ -83,24 +106,37 @@ def write_depth(name, depth, valid, folder):
     d = np.where(finite, depth, fill)
     rgba[..., 0] = rgba[..., 1] = rgba[..., 2] = d
     rgba[..., 3] = 1.0 if valid is None else valid.astype(np.float32)
-    path = os.path.join(folder, bpy.path.clean_name(name) + ".exr")
+    return _write_exr(name, rgba, folder, non_color=True)
 
-    img = bpy.data.images.get(name)
-    if img is not None and tuple(img.size) != (w, h):
-        bpy.data.images.remove(img)
-        img = None
-    if img is None:
-        img = bpy.data.images.new(name, w, h, alpha=True, float_buffer=True)
-    img.colorspace_settings.name = "Non-Color"
-    img.alpha_mode = "STRAIGHT"
-    img.pixels.foreach_set(rgba[::-1].ravel())
-    img.filepath_raw = path
-    img.file_format = "OPEN_EXR"
-    img.save()
-    img["depth_scene_token"] = uuid.uuid4().hex
-    img.update()
-    _cache[_key(img)] = rgba
-    return img
+
+def write_map(name, arr, folder, non_color):
+    """Save a material pass ((h, w) grey or (h, w, 3) colour, float) as EXR and load it.
+
+    ``non_color`` for data (normal, roughness, metallic, shading); colour maps
+    (albedo, residual) keep Blender's scene-linear default for float images.
+    """
+    arr = np.asarray(arr, np.float32)
+    h, w = arr.shape[:2]
+    rgba = np.ones((h, w, 4), np.float32)
+    rgba[..., :3] = arr[..., None] if arr.ndim == 2 else arr[..., :3]
+    return _write_exr(name, rgba, folder, non_color)
+
+
+def write_png(rgb, path):
+    """Save display-referred RGB [0, 1] (h, w, 3) as an 8-bit sRGB PNG (input for external tools)."""
+    rgb = np.clip(np.asarray(rgb, np.float32)[..., :3], 0.0, 1.0)
+    h, w = rgb.shape[:2]
+    tmp = bpy.data.images.new("depth_scene_export_tmp", w, h, alpha=False)
+    try:
+        px = np.ones((h, w, 4), np.float32)
+        px[..., :3] = rgb
+        tmp.pixels.foreach_set(px[::-1].ravel())
+        tmp.filepath_raw = path
+        tmp.file_format = "PNG"
+        tmp.save()
+    finally:
+        bpy.data.images.remove(tmp)
+    return path
 
 
 def depth_arrays(img):

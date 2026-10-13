@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from depth_scene.core import depth as dm  # noqa: E402
 from depth_scene.core import geometry as geo  # noqa: E402
-from depth_scene.core import imaging, moge_post  # noqa: E402
+from depth_scene.core import imaging  # noqa: E402
 from synthetic import camera_points, corridor_depth  # noqa: E402
 
 FOV = math.radians(65.0)
@@ -186,35 +186,7 @@ def test_detail_displacement_moves_bright_pixels_closer():
     assert zs[32, 32] < zs[2, 2]
 
 
-# ---------------------------------------------------------------- MoGe post-processing
-
-@pytest.mark.parametrize("fov_deg,size", [(65.0, (96, 72)), (40.0, (64, 96))])
-def test_moge_focal_shift_recovery(fov_deg, size):
-    fov = math.radians(fov_deg)
-    w, h = size
-    depth, _ = corridor_depth(w, h, fov)
-    gt = camera_points(depth, fov)
-    # OpenCV convention for MoGe: y down, z forward
-    cv = np.stack([gt[..., 0], -gt[..., 1], -gt[..., 2]], axis=-1)
-    scale, shift = 3.7, 0.8
-    affine = cv / scale
-    affine[..., 2] -= shift
-    rec_depth, valid, fov_long = moge_post.postprocess(affine, np.ones((h, w)), metric_scale=scale)
-    assert valid.all()
-    assert math.degrees(fov_long) == pytest.approx(fov_deg, abs=0.2)
-    assert np.allclose(rec_depth, depth, rtol=5e-3)
-
-
-# ---------------------------------------------------------------- layer index (Illustrator's Depth)
-
-def test_layers_kind_is_front_high_and_linear():
-    layers = np.array([[0.0, 1.0], [2.0, 3.0]], np.float32)      # 3 = top layer
-    t = dm.nearness(layers, "layers")
-    assert t[1, 1] == pytest.approx(1.0) and t[0, 0] == pytest.approx(0.0)
-    assert dm.default_mapping("layers") == "LINEAR"
-    z = dm.map_to_distance(t, "LINEAR", near=1.0, far=4.0)
-    assert np.allclose(np.diff(np.sort(z.ravel())), 1.0)          # equal steps per layer
-
+# ---------------------------------------------------------------- quantize (diorama look)
 
 def test_quantize_levels_and_off():
     t = np.linspace(0, 1, 101, dtype=np.float32)
@@ -223,16 +195,73 @@ def test_quantize_levels_and_off():
     assert np.array_equal(dm.quantize(t, 0), t) and np.array_equal(dm.quantize(t, 1), t)
 
 
-def test_robust_clip_removes_clamp_outliers():
-    v = np.linspace(-2, -1, 10000, dtype=np.float32)
-    v[0] = -1e4
-    c = dm.robust_clip(v)
-    assert c.min() > -2.01 and c.max() == pytest.approx(-1.0, abs=0.01)
-
-
 def test_quantized_relief_gives_flat_layers():
     ramp = np.tile(np.linspace(0, 7, 64, dtype=np.float32), (48, 1))
     p = geo.MeshParams(mode="RELIEF", resolution=64, base_displacement=1.0, layer_steps=4)
-    verts, _, _, _ = geo.build(p, ramp, "layers", (64, 48))
+    verts, _, _, _ = geo.build(p, ramp, "disparity", (64, 48))
     levels = sorted(set(np.round(verts[:, 2], 5)))
     assert levels == pytest.approx([0.0, 1 / 3, 2 / 3, 1.0], abs=1e-5)
+
+
+# ---------------------------------------------------------------- material passes
+
+def test_srgb_linear_roundtrip():
+    from depth_scene.core import imaging
+
+    x = np.linspace(0, 1, 101, dtype=np.float32)
+    assert np.abs(imaging.linear_to_srgb(imaging.srgb_to_linear(x)) - x).max() < 1e-5
+
+
+def test_lighting_calibration_recovers_scales():
+    from depth_scene.core import passes
+
+    rng = np.random.default_rng(0)
+    albedo = rng.random((20, 30, 3)).astype(np.float32)
+    shading = rng.random((20, 30, 3)).astype(np.float32)
+    residual = rng.random((20, 30, 3)).astype(np.float32) * 0.2
+    image = albedo * shading * 2.5 + residual * 0.4
+    s, r, info = passes.calibrate_lighting(image, albedo, shading, residual)
+    assert info["shading_scale"] == pytest.approx(2.5, rel=1e-4)
+    assert info["residual_scale"] == pytest.approx(0.4, rel=1e-4)
+    assert info["fit_error"] < 1e-5
+    assert np.allclose(albedo * s + r, image, atol=1e-4)
+
+
+def test_lighting_calibration_never_negative():
+    from depth_scene.core import passes
+
+    rng = np.random.default_rng(1)
+    albedo = rng.random((10, 10, 3)).astype(np.float32)
+    shading = rng.random((10, 10, 3)).astype(np.float32)
+    residual = 1.0 - albedo * shading                 # anti-correlated: unconstrained fit gives b < 0
+    image = albedo * shading * 1.5
+    _, _, info = passes.calibrate_lighting(image, albedo, shading, residual)
+    assert info["shading_scale"] >= 0 and info["residual_scale"] >= 0
+
+
+def test_intrinsics_to_maps_converts_srgb_albedo_and_renames():
+    from depth_scene.core import imaging, passes
+
+    alb = np.full((4, 6, 3), 0.5, np.float32)
+    rough = np.full((4, 6), 1.2, np.float32)
+    maps, info = passes.intrinsics_to_maps({"albedo": (alb, "srgb", False), "roughness": (rough, "linear", False),
+                                            "metallicity": (rough * 0, "linear", False)})
+    assert set(maps) == {"albedo", "roughness", "metallic"}
+    assert np.allclose(maps["albedo"], imaging.srgb_to_linear(alb))
+    assert maps["roughness"].max() == 1.0                     # clipped to [0, 1]
+    assert info == {}
+
+
+# ---------------------------------------------------------------- Marigold V2 log depth
+
+def test_log_mapping_inverts_affine_log_depth():
+    """Log depth d = a*log z + b, min/max normalised: LOG mapping with the true near/far is exact."""
+    z = np.geomspace(1.5, 24.0, 50).astype(np.float32)
+    d = 0.37 * np.log(z) - 1.1                                  # unknown scale and shift
+    t = dm.nearness(d, "log_depth")
+    assert t[0] == pytest.approx(1.0) and t[-1] == pytest.approx(0.0)
+    out = dm.map_to_distance(t, "LOG", 1.5, 24.0)
+    assert np.allclose(out, z, rtol=1e-4)
+    assert dm.default_mapping("log_depth") == "LOG"
+    lin = dm.map_to_distance(t, "LINEAR", 1.5, 24.0)            # the wrong mapping bends the geometry
+    assert np.abs(lin - z).max() > 3.0

@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "depth_scene"
-version = "0.1.0"
-name = "Depth Scene"
-tagline = "Turn one image into a 3D scene with AI depth"
+version = "0.3.0"
+name = "Depth Scene (Marigold)"
+tagline = "Image to 3D scene with Marigold depth, normals and materials"
 maintainer = "saranunt-0"
 type = "add-on"
 website = "https://github.com/saranunt-0/2D-to-3D-TrueDepth"
@@ -16,7 +16,7 @@ license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
 network = "Download depth models and install ONNX Runtime"
-files = "Read images, write depth maps and models"
+files = "Read images, write depth maps and models, run your own Marigold V2 install"
 
 [build]
 paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

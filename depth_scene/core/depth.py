@@ -7,13 +7,12 @@ Depth models output one of three kinds of map:
     scale and shift. Depth Anything V2, MiDaS, and "white = near" depth maps.
 ``depth``
     Relative depth (bigger = farther), again up to scale and shift.
-    "White = far" depth maps exported from other tools.
+    Marigold v1.1's output, and "white = far" depth maps from other tools.
+``log_depth``
+    Relative *log* depth (bigger = farther), up to scale and shift:
+    log z = a * d + b. Marigold V2's default output.
 ``metric``
-    Absolute planar depth in metres (MoGe-2, metric models).
-``layers``
-    Illustrator's depth: a per-pixel *layer index* (bigger = drawn on top),
-    i.e. an ordering, not a distance. Equal index steps are equal depth
-    steps, so the natural mapping is LINEAR.
+    Absolute planar depth in metres (EXRs from renderers / metric models).
 
 Everything is first converted to a normalised *nearness* ``t`` in [0, 1]
 (1 = nearest pixel, 0 = farthest), then mapped to distances with one of the
@@ -21,6 +20,7 @@ TrueDepth-style mappings:
 
 ``INVERSE``  1/z = t/near + (1 - t)/far   (correct for disparity input)
 ``LINEAR``   z   = t*near + (1 - t)*far   (correct for relative depth input)
+``LOG``      z   = near^t * far^(1 - t)   (correct for relative log depth)
 ``METRIC``   z   = metric_depth * scale   (only for metric input)
 
 For relative maps the near/far ratio stands in for the unknown shift, so it
@@ -31,8 +31,8 @@ import numpy as np
 
 from . import imaging
 
-KINDS = ("disparity", "depth", "metric", "layers")
-MAPPINGS = ("INVERSE", "LINEAR", "METRIC")
+KINDS = ("disparity", "depth", "log_depth", "metric")
+MAPPINGS = ("INVERSE", "LINEAR", "LOG", "METRIC")
 
 
 def _finite_range(values, mask=None):
@@ -58,9 +58,9 @@ def normalize(values, mask=None):
 def nearness(depth_map, kind, mask=None):
     """Convert a raw depth map to normalised nearness (1 = near, 0 = far)."""
     depth_map = np.asarray(depth_map, dtype=np.float32)
-    if kind in ("disparity", "layers"):
+    if kind == "disparity":
         return normalize(depth_map, mask)
-    if kind == "depth":
+    if kind in ("depth", "log_depth"):
         return 1.0 - normalize(depth_map, mask)
     if kind == "metric":
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -71,14 +71,13 @@ def nearness(depth_map, kind, mask=None):
 
 
 def default_mapping(kind):
-    return {"disparity": "INVERSE", "depth": "LINEAR", "metric": "METRIC", "layers": "LINEAR"}[kind]
+    return {"disparity": "INVERSE", "depth": "LINEAR", "log_depth": "LOG", "metric": "METRIC"}[kind]
 
 
 def quantize(t, steps):
     """Snap nearness to ``steps`` evenly spaced levels (0/1 = off).
 
-    Gives the flat, stacked "paper cut-out / diorama" look; with layer-index
-    maps each level is one illustration layer.
+    Gives the flat, stacked "paper cut-out / diorama" look.
     """
     steps = int(steps)
     if steps < 2:
@@ -87,18 +86,8 @@ def quantize(t, steps):
     return (np.round(t * (steps - 1)) / (steps - 1)).astype(np.float32)
 
 
-def robust_clip(values, low_pct=0.5, high_pct=99.5):
-    """Clip outliers to the given percentiles of the finite values."""
-    values = np.asarray(values, dtype=np.float32)
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return values
-    lo, hi = np.percentile(finite, [low_pct, high_pct])
-    return np.clip(values, lo, hi).astype(np.float32)
-
-
 def map_to_distance(t, mapping, near, far):
-    """Map nearness ``t`` to planar distance using INVERSE or LINEAR mapping."""
+    """Map nearness ``t`` to planar distance using INVERSE, LINEAR or LOG mapping."""
     t = np.clip(np.asarray(t, dtype=np.float32), 0.0, 1.0)
     near = max(float(near), 1e-4)
     far = max(float(far), near + 1e-4)
@@ -106,6 +95,8 @@ def map_to_distance(t, mapping, near, far):
         return (1.0 / (t / near + (1.0 - t) / far)).astype(np.float32)
     if mapping == "LINEAR":
         return (t * near + (1.0 - t) * far).astype(np.float32)
+    if mapping == "LOG":
+        return np.exp(t * np.log(near) + (1.0 - t) * np.log(far)).astype(np.float32)
     raise ValueError(f"mapping {mapping!r} needs metric input")
 
 

@@ -1,5 +1,5 @@
 # development_note/index.yaml
-last_updated: "2026-10-10"
+last_updated: "2026-10-13"
 modules:
   - name: depth-estimation
     path: modules/depth-estimation/timeline.md
@@ -10,6 +10,9 @@ modules:
   - name: blender-addon
     path: modules/blender-addon/timeline.md
     description: "Extension packaging, preferences (ORT install, downloads), live properties, cameras, UI, bpy tests"
+  - name: marigold
+    path: modules/marigold/timeline.md
+    description: "Branch marigold: Marigold-only variant, licence, DDIM port, ONNX export, normals/IID passes, Marigold V2 external backend"
 standalone:
   - name: architecture
     path: architecture.md

@@ -1,16 +1,32 @@
 """User-facing operators."""
 
-import math
-
 import bpy
-from bpy.props import EnumProperty, FloatProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
 
-from . import bimage, builder
+from . import bimage, builder, v2_job
 
 
 def _cursor(context, kind):
     if context.window is not None:      # None when run from a script
         context.window.cursor_set(kind)
+
+
+class _Progress:
+    """Marigold takes seconds to minutes: show progress on the cursor/status bar."""
+
+    def __init__(self, context):
+        self.wm = context.window_manager if context.window is not None else None
+        if self.wm:
+            self.wm.progress_begin(0, 100)
+
+    def __call__(self, fraction):
+        if self.wm:
+            self.wm.progress_update(int(fraction * 100))
+
+    def end(self):
+        if self.wm:
+            self.wm.progress_end()
+            self.wm = None          # idempotent: a later end() must not stop another operator's bar
 
 
 def _active_depth_object(context):
@@ -32,27 +48,59 @@ class DEPTHSCENE_OT_generate_depth(bpy.types.Operator):
 
     def execute(self, context):
         s = context.scene.depth_scene
+        if s.backend == "V2":
+            return _start_v2(self, context, build=False)
         _cursor(context, "WAIT")
+        progress = _Progress(context)
         try:
-            depth_img, kind, fov, result = builder.generate_depth(s, s.image)
+            depth_img, kind, result = builder.generate_depth(s, s.image, progress=progress)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
+            progress.end()
             _cursor(context, "DEFAULT")
         s.existing_depth = depth_img
         s.existing_kind = kind
-        msg = f"Depth {depth_img.size[0]}x{depth_img.size[1]} in {result.seconds:.2f}s on {result.provider}"
-        if fov:
-            msg += f", estimated FOV {math.degrees(fov):.1f} deg"
-        self.report({"INFO"}, msg)
+        self.report({"INFO"}, f"Depth {depth_img.size[0]}x{depth_img.size[1]} in {result.seconds:.1f}s "
+                              f"on {result.provider}")
         return {"FINISHED"}
+
+
+def _start_v2(op, context, build=False, passes_only=False):
+    """Hand over to the Marigold V2 operator (modal with a window, blocking from scripts)."""
+    if "job" in v2_job.ACTIVE:
+        op.report({"WARNING"}, "Marigold V2 is already running - wait for it or press Esc to cancel")
+        return {"CANCELLED"}
+    mode = "INVOKE_DEFAULT" if context.window is not None else "EXEC_DEFAULT"
+    try:
+        res = bpy.ops.depth_scene.marigold_v2(mode, build=build, passes_only=passes_only)
+    except RuntimeError as exc:         # its error report, re-raised by bpy.ops
+        op.report({"ERROR"}, str(exc).replace("Error: ", "", 1).strip())
+        return {"CANCELLED"}
+    return {"FINISHED"} if "RUNNING_MODAL" in res else res
+
+
+def _run_passes(op, context, obj, progress):
+    """Generate the enabled v1.1 material passes for ``obj`` and report; never raises."""
+    s = context.scene.depth_scene
+    if not builder.enabled_pass_groups(s):
+        return {}, []
+    _cursor(context, "WAIT")
+    results, messages, errors = builder.generate_passes(s, obj.depth_scene.image, progress=progress)
+    builder.assign_passes(obj, results, s.albedo_from)
+    for msg in errors:
+        op.report({"WARNING"}, msg)
+    if results:
+        op.report({"INFO"}, "Material passes: " + "; ".join(messages) + " - add lights to see them")
+    return results, errors
 
 
 class DEPTHSCENE_OT_build(bpy.types.Operator):
     bl_idname = "depth_scene.build"
     bl_label = "Build 3D Scene"
-    bl_description = "Generate depth if needed, then build the 3D mesh, projector and shot cameras"
+    bl_description = ("Generate depth if needed, then build the 3D mesh, projector and shot cameras "
+                      "(and the enabled material passes)")
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -62,7 +110,7 @@ class DEPTHSCENE_OT_build(bpy.types.Operator):
     def execute(self, context):
         s = context.scene.depth_scene
         image = s.image
-        fov = None
+        progress = _Progress(context)
         try:
             if s.use_existing_depth:
                 if s.existing_depth is None:
@@ -70,24 +118,203 @@ class DEPTHSCENE_OT_build(bpy.types.Operator):
                 depth_img, kind = s.existing_depth, s.existing_kind
                 if not depth_img.is_float or depth_img.colorspace_settings.name != "Non-Color":
                     depth_img.colorspace_settings.name = "Non-Color"
-                fov = depth_img.get("depth_scene_fov")
             elif (s.existing_depth is not None
                   and s.existing_depth.get("depth_scene_source") == builder.depth_signature(s, image)):
                 # Same image + model settings: reuse the depth from 'Generate Depth Map'.
                 depth_img, kind = s.existing_depth, s.existing_kind
-                fov = depth_img.get("depth_scene_fov")
+            elif s.backend == "V2":
+                progress.end()
+                return _start_v2(self, context, build=True)   # runs V2, then builds when it finishes
             else:
                 _cursor(context, "WAIT")
-                depth_img, kind, fov, result = builder.generate_depth(s, image)
+                depth_img, kind, _ = builder.generate_depth(s, image, progress=progress)
                 s.existing_depth, s.existing_kind = depth_img, kind
-            obj = builder.build_scene(context, image, depth_img, kind, s.mode, est_fov=fov)
+            obj = builder.build_scene(context, image, depth_img, kind, s.mode)
+            o = obj.depth_scene
+            self.report({"INFO"}, f"Built '{obj.name}': {o.stat_faces} faces, {o.stat_removed} stretched removed")
+            if builder.enabled_pass_groups(s):
+                _run_passes(self, context, obj, progress)
+            if builder.enabled_v2_passes(s):
+                progress.end()
+                return _start_v2(self, context, passes_only=True)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
+            progress.end()
             _cursor(context, "DEFAULT")
-        o = obj.depth_scene
-        self.report({"INFO"}, f"Built '{obj.name}': {o.stat_faces} faces, {o.stat_removed} stretched removed")
+        return {"FINISHED"}
+
+
+class DEPTHSCENE_OT_generate_passes(bpy.types.Operator):
+    bl_idname = "depth_scene.generate_passes"
+    bl_label = "Generate Material Passes"
+    bl_description = ("Run the enabled Marigold normals / intrinsics models on the active Depth Scene "
+                      "object's image and wire the maps into its material")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = _active_depth_object(context)
+        s = context.scene.depth_scene
+        return (obj is not None and obj.depth_scene.image is not None
+                and bool(builder.enabled_pass_groups(s) or builder.enabled_v2_passes(s)))
+
+    def execute(self, context):
+        obj = _active_depth_object(context)
+        s = context.scene.depth_scene
+        progress = _Progress(context)
+        try:
+            results, errors = _run_passes(self, context, obj, progress)
+        finally:
+            progress.end()
+            _cursor(context, "DEFAULT")
+        if builder.enabled_v2_passes(s):
+            return _start_v2(self, context, passes_only=True)
+        if not results:
+            self.report({"ERROR"}, errors[0] if errors else "No pass generated")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class DEPTHSCENE_OT_marigold_v2(bpy.types.Operator):
+    bl_idname = "depth_scene.marigold_v2"
+    bl_label = "Run Marigold V2"
+    bl_description = ("Run your Marigold V2 install (separate process, CUDA GPU) for depth and the enabled "
+                      "V2 passes, then import the results. Esc cancels")
+    bl_options = {"REGISTER", "UNDO"}
+
+    build: BoolProperty(name="Build When Done", default=False,
+                        description="Build the 3D scene from the new depth map when it finishes")
+    passes_only: BoolProperty(name="Passes Only", default=False,
+                              description="Only the V2 material passes, for the active Depth Scene object")
+
+    _timer = None
+    _job = None
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.depth_scene.image is not None and "job" not in v2_job.ACTIVE
+
+    def _make_job(self, context):
+        s = context.scene.depth_scene
+        modalities = list(builder.enabled_v2_passes(s))
+        image = s.image
+        self._target = None
+        if self.passes_only:
+            obj = _active_depth_object(context)
+            if obj is None:
+                raise RuntimeError("Select a Depth Scene object first")
+            self._target = obj.name
+            image = obj.depth_scene.image
+        else:
+            modalities.insert(0, "depth")
+        if not modalities:
+            raise RuntimeError("Nothing to run: enable a Marigold V2 pass")
+        return v2_job.V2Job(s, image, modalities)
+
+    def _finish(self, context, job):
+        s = context.scene.depth_scene
+        depth = job.results.get("depth")
+        if depth is not None:
+            s.existing_depth, s.existing_kind = depth, job.kind
+        obj = bpy.data.objects.get(self._target) if self._target else None
+        if self.build and depth is not None:
+            obj = builder.build_scene(context, job.image, depth, job.kind, s.mode)
+            if builder.enabled_pass_groups(s):
+                _run_passes(self, context, obj, None)
+        if obj is not None and job.pass_results():
+            builder.assign_passes(obj, job.pass_results(), s.albedo_from)
+        done = ", ".join(sorted(job.results)) or "nothing"
+        self.report({"INFO"}, f"Marigold V2 done: {done}" + (f" -> built '{obj.name}'" if self.build and obj else ""))
+
+    def execute(self, context):          # scripts / background mode: blocking
+        try:
+            job = self._make_job(context)
+            state = job.run_blocking()
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if state != "done":
+            self.report({"ERROR"}, job.error)
+            return {"CANCELLED"}
+        self._finish(context, job)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        try:
+            self._job = self._make_job(context)
+            self._job.start()
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        v2_job.ACTIVE["job"] = self._job
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
+        self._timer = wm.event_timer_add(0.5, window=context.window)
+        wm.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _cleanup(self, context):
+        wm = context.window_manager
+        if self._timer is not None:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+        wm.progress_end()
+        if context.workspace is not None:
+            context.workspace.status_text_set(None)
+        v2_job.ACTIVE.pop("job", None)
+
+    def modal(self, context, event):
+        job = self._job
+        if event.type == "ESC":
+            job.cancel()
+            self._cleanup(context)
+            self.report({"WARNING"}, "Marigold V2 cancelled")
+            return {"CANCELLED"}
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        state = job.poll()
+        if state == "running":
+            context.window_manager.progress_update(int(job.fraction * 100))
+            if context.workspace is not None:
+                context.workspace.status_text_set(job.status + "   (Esc to cancel)")
+            for area in context.screen.areas if context.screen else ():
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
+            return {"PASS_THROUGH"}
+        self._cleanup(context)
+        if state == "error":
+            self.report({"ERROR"}, job.error)
+            return {"CANCELLED"}
+        try:
+            self._finish(context, job)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class DEPTHSCENE_OT_add_light(bpy.types.Operator):
+    bl_idname = "depth_scene.add_light"
+    bl_label = "Add Light"
+    bl_description = "Add a light in front of the projector, sized to the scene, to try the lit material"
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: EnumProperty(name="Type", items=[
+        ("POINT", "Point", ""), ("AREA", "Area", ""), ("SPOT", "Spot", ""), ("SUN", "Sun", "")], default="POINT")
+
+    @classmethod
+    def poll(cls, context):
+        obj = _active_depth_object(context)
+        return obj is not None and obj.parent is not None
+
+    def execute(self, context):
+        obj = _active_depth_object(context)
+        light = builder.add_light(obj, self.kind)
+        if obj.depth_scene.shading != "PRINCIPLED":
+            obj.depth_scene.shading = "PRINCIPLED"
+        self.report({"INFO"}, f"Added '{light.name}' (power {light.data.energy:g}) - move it to relight the scene")
         return {"FINISHED"}
 
 
@@ -110,23 +337,6 @@ class DEPTHSCENE_OT_rebuild(bpy.types.Operator):
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        return {"FINISHED"}
-
-
-class DEPTHSCENE_OT_apply_estimated_fov(bpy.types.Operator):
-    bl_idname = "depth_scene.apply_estimated_fov"
-    bl_label = "Use Estimated FOV"
-    bl_description = "Set the FOV to the value estimated by the geometry model"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        obj = _active_depth_object(context)
-        return obj is not None and obj.depth_scene.estimated_fov > 0
-
-    def execute(self, context):
-        o = _active_depth_object(context).depth_scene
-        o.fov = o.estimated_fov
         return {"FINISHED"}
 
 
@@ -212,8 +422,10 @@ class DEPTHSCENE_OT_look_through(bpy.types.Operator):
 classes = (
     DEPTHSCENE_OT_generate_depth,
     DEPTHSCENE_OT_build,
+    DEPTHSCENE_OT_generate_passes,
+    DEPTHSCENE_OT_marigold_v2,
+    DEPTHSCENE_OT_add_light,
     DEPTHSCENE_OT_rebuild,
-    DEPTHSCENE_OT_apply_estimated_fov,
     DEPTHSCENE_OT_camera_move,
     DEPTHSCENE_OT_reset_shot,
     DEPTHSCENE_OT_look_through,
