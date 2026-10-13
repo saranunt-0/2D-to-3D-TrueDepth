@@ -12,7 +12,7 @@ modules:
     description: "Extension packaging, preferences (ORT install, downloads), live properties, cameras, UI, bpy tests"
   - name: marigold
     path: modules/marigold/timeline.md
-    description: "Branch marigold: Marigold-only variant, licence, DDIM port, ONNX export, normals/IID material passes"
+    description: "Branch marigold: Marigold-only variant, licence, DDIM port, ONNX export, normals/IID passes, Marigold V2 external backend"
 standalone:
   - name: architecture
     path: architecture.md

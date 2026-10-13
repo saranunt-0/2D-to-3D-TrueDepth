@@ -5,8 +5,12 @@
 > (`prs-eth/marigold-depth-v1-1`) builds the mesh, and the optional normals
 > and intrinsic-image models (`marigold-normals-v1-1`,
 > `marigold-iid-appearance-v1-1`, `marigold-iid-lighting-v1-1`) turn the image
-> into a lit PBR material. The `main` branch has the lighter models
-> (Depth Anything V2, MoGe-2) and Illustrator's Depth instead.
+> into a lit PBR material. It can also drive
+> [**Marigold V2**](https://github.com/huawei-bayerlab/marigold-v2) (depth,
+> normals, albedo) as an external GPU backend, see
+> [Marigold V2 backend](#marigold-v2-backend-external-gpu). The `main`
+> branch has the lighter models (Depth Anything V2, MoGe-2) and
+> Illustrator's Depth instead.
 
 A Blender add-on that estimates depth from a single image with Marigold, a
 diffusion-based AI depth model, and rebuilds the picture as real 3D geometry. You can then move a camera
@@ -111,7 +115,8 @@ DDIM scheduler is ported to NumPy and matches diffusers to 1e-6.
 
 | Mapping | Formula (t = 1 nearest … 0 farthest) | Use for |
 |---|---|---|
-| **Linear**  | z = t·near + (1−t)·far | Marigold (default), "white = far" maps |
+| **Linear**  | z = t·near + (1−t)·far | Marigold v1.1 (default), "white = far" maps |
+| **Logarithmic** | z = near^t · far^(1−t) | Marigold V2 log depth (default V2 checkpoint) |
 | **Inverse** | 1/z = t/near + (1−t)/far | disparity maps from other tools |
 | **Metric**  | z = depth × scale | metric EXRs from a renderer |
 
@@ -169,6 +174,84 @@ decomposition does not explain this image well. All maps stay at the
 processing resolution; the mesh samples them through its image UVs, so they
 need no resampling.
 
+### Marigold V2 backend (external GPU)
+
+[Marigold V2](https://github.com/huawei-bayerlab/marigold-v2) (Pavlovic et
+al., SIGGRAPH Asia 2026) is a different model, not a v1.1 update. It turns
+the Qwen-Image-Edit-2509 diffusion transformer (~20 B parameters, frozen,
+quantised to 4 bit when loaded) into single-step predictors with small LoRA
+adapters: depth (sharper edges, fur, hair), see-through depth, surface
+normals and albedo.
+
+**It cannot run inside Blender.** It needs:
+
+* PyTorch + bitsandbytes on a **CUDA GPU**;
+* about **17 GB of VRAM at 1024 px** and 29 GB at 2048 px;
+* Linux;
+* a one-time download of the Qwen backbone and checkpoints.
+
+So the add-on runs *your* Marigold V2 install as a separate process,
+through its official `scripts/infer.py`, and imports the result. Blender
+stays responsive meanwhile: the status bar shows progress and **Esc**
+cancels.
+
+| | Marigold v1.1 (in Blender) | Marigold V2 (external) |
+|---|---|---|
+| Runs | ONNX Runtime inside Blender, CPU or GPU | your marigold-v2 Python environment, CUDA GPU |
+| Hardware | any; ~9 GB RAM on CPU | NVIDIA GPU, 17+ GB VRAM (1024 px) |
+| Depth output | affine-invariant depth → Linear | affine-invariant **log** depth → **Logarithmic** (other checkpoints: linear, disparity, see-through) |
+| Material passes | normals, albedo/roughness/metallic, shading/highlights | normals, albedo (roughness/metallic/shading still from v1.1) |
+| Licence | Open RAIL++-M (use restrictions) | **Apache-2.0** |
+| Cost per run | seconds (GPU) to ~35 s (CPU) | backbone reload (minutes) + inference, per modality |
+
+**Setup (one time, on the Linux + CUDA machine that runs Blender):**
+
+```bash
+git clone https://github.com/huawei-bayerlab/marigold-v2.git
+cd marigold-v2
+bash setup/setup_env.sh                              # conda env "marigold-v2"
+conda activate marigold-v2
+python scripts/download_assets.py --skip-datasets    # Qwen-Image-Edit-2509 + Marigold V2 checkpoints
+python scripts/infer.py --image_dir assets/examples --output_dir output/examples   # test it once
+```
+
+Then open *Preferences → Add-ons → Depth Scene → Marigold V2* and set:
+
+* **Python**: the environment's interpreter, e.g.
+  `~/miniconda3/envs/marigold-v2/bin/python` (`which python` inside the
+  activated env);
+* **Repository**: the clone;
+* **Assets Folder**: only if you set `DEPTH_ASSETS_DIR`.
+
+The panel lists anything missing.
+
+**Use:**
+
+1. **2. Depth** → backend **Marigold V2 (external GPU)**.
+2. Pick a **Depth Checkpoint**. *Log (default)* is the paper model;
+   *Log, see-through* reconstructs what is behind glass / windows.
+3. Set **Inference Resolution**: the longer side, in multiples of 16;
+   0 = native size; 1024 needs ~17 GB VRAM.
+4. Optional: tick **Normal Map (Marigold V2)** and **Albedo (Marigold V2)**
+   in **3. Material Passes**. The v1.1 *Albedo / Roughness / Metallic* and
+   *Shading / Highlights* passes can still be added; they run in Blender.
+5. **Build 3D Scene**. It runs V2 for depth and the ticked passes, imports
+   them, then builds the scene.
+
+What the add-on does with V2's `.npy` outputs:
+
+* **Depth** is clipped to the training range [−1, 1] and saved as EXR. The
+  default checkpoints give log depth, which uses **Logarithmic** mapping.
+* **Normals** use the same camera frame as v1.1, so they feed the same
+  Object-space normal map.
+* **Albedo:** `infer.py` writes linear albedo with a 1/2.2 gamma applied. The
+  add-on undoes it (x^2.2) to get linear albedo again.
+
+Every `infer.py` run reloads and re-quantises the 20 B backbone. So with
+depth + normals + albedo, expect three model loads, each **minutes** long.
+Results are reused while the image and V2 settings are unchanged. Logs and
+inputs go to `<Save Location>/marigold_v2/<image>/`.
+
 ---
 
 ## 2. Licence: can I use Marigold commercially?
@@ -205,9 +288,12 @@ What Open RAIL++-M asks of you:
   just *using* the add-on is unaffected. If you **sell** a product that
   bundles the converted ONNX files, the redistribution conditions above
   apply. Have a lawyer confirm for a commercial product.
-* Don't confuse it with **Marigold V2** (Huawei, Sept 2026). That is a
-  different, ~20 B-parameter model built on Qwen-Image-Edit, and far too
-  large to run inside Blender.
+* **Marigold V2** (Huawei Bayer Lab / EPFL / Bologna, Sept 2026) is
+  licensed differently and more permissively: code and checkpoints are
+  **Apache-2.0** (repo `LICENSE` and `NOTICE`). Its Qwen-Image-Edit-2509
+  backbone is Apache-2.0 too (Hugging Face licence tag). Apache-2.0 has no
+  use-based restrictions; keep the licence and `NOTICE` if you redistribute.
+  The add-on ships nothing from V2; it only runs your own install.
 
 ---
 
@@ -266,6 +352,8 @@ Requires **Blender 4.2 LTS or newer**. Tested with Blender 4.2.23 LTS and
    Float16* on a GPU and Float32 on CPU. Set *Processing Resolution 768*,
    *Denoising Steps 0* (the default, 1 step) and *Ensemble 1*.
    Optionally click **Generate Depth Map** to preview.
+   With an NVIDIA GPU of 17+ GB, choose the **Marigold V2** backend instead
+   ([setup](#marigold-v2-backend-external-gpu)).
 4. **3. Material Passes** (optional): tick **Normal Map** and **Albedo /
    Roughness / Metallic** (and **Shading / Highlights** if you want to keep
    painted shadows).
@@ -288,7 +376,9 @@ Requires **Blender 4.2 LTS or newer**. Tested with Blender 4.2.23 LTS and
 
 | Depth Scene | TrueDepth | What it does |
 |---|---|---|
+| Backend v1.1 / V2 | — | In-Blender ONNX (v1.1) or your external Marigold V2 install |
 | Model (Marigold v1.1) | Model Size | Depth network |
+| V2: Depth Checkpoint, Inference Resolution, Seed | — | Log (default) / see-through / linear / disparity; longer side ×16 (0 = native); VAE sampling seed |
 | Device Auto/GPU/CPU | Processing Device | Execution provider |
 | Precision fp32/fp16 | Precision | fp16 halves the U-Net (2.0 vs 3.6 GB) and was faster even on CPU; max depth difference 0.008 |
 | Processing Resolution | (implicit) | Longer side fed to Marigold (768 default, 0 = native) |
@@ -343,6 +433,15 @@ correction.
   **Original Lighting** sliders let you back off.
 * **No FOV estimate.** Marigold predicts depth only, so set the FOV
   yourself for perspective scenes.
+* **Marigold V2 is external.** It needs an NVIDIA GPU with 17+ GB VRAM and
+  a Linux Python environment. It reloads its 20 B backbone for every
+  modality, so it takes minutes per run, and its RAM and disk needs are large
+  (Qwen backbone download).
+  The add-on only checks files; GPU and package problems show up as the
+  run's error message, with the full log in
+  `<Save Location>/marigold_v2/<image>/marigold_v2.log`. Tested against a
+  stand-in `infer.py` with the same interface; the real model was not run
+  (no GPU in the development sandbox).
 * **Ensemble alignment** uses a least-squares approximation, because Blender
   has no SciPy and diffusers uses a SciPy optimiser. With Ensemble = 1
   (the default) results match diffusers.
@@ -357,11 +456,13 @@ depth_scene/          the add-on (Blender extension, manifest + bl_info)
   core/               NumPy-only maths: resampling, depth mapping, unprojection,
                       stretched faces, DDIM scheduler port, material-pass maps (no bpy)
   ai/                 ONNX Runtime: Marigold pipeline (depth / normals / intrinsics)
-                      + registry   (no bpy)
+                      + registry; marigold_v2.py: V2 command line + output conversion (no bpy)
+  v2_job.py           runs a Marigold V2 install as a background process, imports results
   builder.py · properties.py · operators.py · ui.py · preferences.py
 tests/                pytest: core maths, Marigold loop with fake ONNX graphs (all tasks),
                       DDIM + export parity vs diffusers (if installed), Blender integration
-                      (incl. a normal-map convention render test)
+                      (incl. a normal-map convention render test); fake_marigold_v2.py
+                      stands in for the V2 install
 tools/export_marigold_onnx.py   convert a checkpoint (--task, --check, --fp16, --random-init [--tiny])
 tools/build_zip.py              package the extension
 ```
@@ -373,6 +474,7 @@ python -m pytest tests/          # + torch diffusers for the parity test
 
 ## Licence
 
-Add-on code: GPL-3.0-or-later (see `blender_manifest.toml`). Marigold code:
-Apache-2.0. Marigold weights: CreativeML Open RAIL++-M. You convert them
-yourself; nothing from them ships here. See [section 2](#2-licence-can-i-use-marigold-commercially).
+Add-on code: GPL-3.0-or-later (see `blender_manifest.toml`). Marigold v1.1
+code: Apache-2.0; weights: CreativeML Open RAIL++-M (you convert them
+yourself; nothing from them ships here). Marigold V2 code and checkpoints:
+Apache-2.0 (you install them yourself). See [section 2](#2-licence-can-i-use-marigold-commercially).

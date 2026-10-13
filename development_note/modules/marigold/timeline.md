@@ -3,6 +3,42 @@
 
 ---
 
+## [2026-10-13] Marigold V2 as an external backend
+
+**Type**: `feature`
+**Status**: `resolved` (real V2 run unverified: no GPU in sandbox)
+
+### Context
+User: "Continue in the marigold branch. Set up the plugin for marigold v2. Save it as different commit."
+
+### Work Done
+- Research (repo at 9926d93): Qwen-Image-Edit-2509 DiT (20 B, 4-bit NF4 on load) + LoRA,
+  single step; CUDA 17 GB @1024; CLI scripts/infer.py; outputs .npy (depth mean of decoded,
+  normals unit V1.1 frame, albedo gamma 1/2.2); Apache-2.0 code + checkpoints + backbone.
+- Decision: cannot run in Blender -> external backend driving the official CLI; V1.1 kept.
+- core/depth.py: `log_depth` kind + LOG mapping. ai/marigold_v2.py (pure helpers).
+- v2_job.py: sequential subprocess per modality, reader thread, import as EXR, reuse by signature.
+- Operator `depth_scene.marigold_v2` (modal: progress, status, Esc; blocking from scripts);
+  Generate/Build/Generate Passes route to it with backend V2; nested errors re-reported.
+- Prefs: python / repo / assets + setup check. Scene: backend, checkpoint, resolution, seed,
+  Albedo (V2) pass; albedo source "V2".
+
+### Checklist
+- [x] Unit tests: CLI, env, setup check, conversions, failure (fake infer.py)
+- [x] Blender 4.2.23 / 5.2.2: 66 tests pass incl. V2 end-to-end, reuse, failure, LOG geometry
+- [ ] Real Marigold V2 run on a CUDA GPU
+
+### Debug notes
+- Nested bpy.ops error reports raise RuntimeError inside the calling operator -> caught in
+  `_start_v2` and re-reported.
+- 320x240 at 160 px -> 160x128 (120 is not a multiple of 16; test expectation fixed).
+
+### Assumptions Made
+- Real depth outputs live in about [-1, 1] (training normalisation); clipped there.
+- Every infer.py call reloads the backbone (it spawns evaluate_pipeline) -> minutes per modality.
+
+---
+
 ## [2026-10-13] Material passes: normals + intrinsics (lighting & shadows)
 
 **Type**: `feature`

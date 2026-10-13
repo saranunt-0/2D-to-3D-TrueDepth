@@ -403,6 +403,72 @@ def test_material_passes_generate_wire_and_toggle(addon):
     s.pass_normals = s.pass_appearance = s.pass_lighting = False
 
 
+def test_marigold_v2_backend_end_to_end(addon, monkeypatch):
+    """V2 backend with a fake marigold-v2 install: Build runs depth + passes out of process, then builds."""
+    from fake_marigold_v2 import make_fake_repo
+
+    s = bpy.context.scene.depth_scene
+    prefs = bpy.context.preferences.addons["depth_scene"].preferences
+    repo = make_fake_repo(str(addon["tmp"] / "v2"))
+    prefs.v2_python, prefs.v2_repo, prefs.v2_assets = "", repo, ""
+    s.backend = "V2"
+    s.use_existing_depth = False
+    s.image = addon["image"]
+    with pytest.raises(RuntimeError, match="Marigold V2 is not set up: Python"):   # clear error
+        bpy.ops.depth_scene.generate_depth()
+    prefs.v2_python = sys.executable
+    s.v2_checkpoint, s.v2_resolution, s.v2_seed = "Log-stage2", 160, 3
+    s.pass_normals = s.pass_albedo_v2 = True
+    s.pass_appearance = s.pass_lighting = False
+    s.albedo_from = "V2"
+    s.mode = "PERSPECTIVE"
+    assert bpy.ops.depth_scene.build() == {"FINISHED"}                    # blocking without a window
+    obj = bpy.context.active_object
+    o = obj.depth_scene
+    assert o.is_depth_scene and o.depth_kind == "log_depth" and o.mapping == "LOG"
+    assert tuple(o.depth_image.size) == (160, 128)                        # 320x240 -> 160 x 120 -> multiples of 16
+    assert s.existing_depth == o.depth_image and s.existing_kind == "log_depth"
+    calls = open(os.path.join(bpy.path.abspath(s.save_location), "marigold_v2", "corridor", "out_depth",
+                              "calls.txt")).read()
+    assert "--width 160 --height 128" in calls and "--seed 3" in calls and "Log-stage2" in calls
+
+    # Passes imported in the add-on's conventions and wired into a lit material.
+    from depth_scene import bimage
+    assert o.shading == "PRINCIPLED"
+    alb = bimage.to_array(o.albedo_map)
+    assert np.allclose(alb[5, 5, :3], 0.5, atol=1e-4)                      # gamma 2.2 undone -> linear
+    nrm = bimage.to_array(o.normal_map)
+    assert np.allclose(nrm[5, 5, :3], [0.8, 0.5, 0.9], atol=1e-4)           # (0.6, 0, 0.8) encoded
+    assert o.albedo_map["depth_scene_pass_group"] == "v2"
+
+    # Log depth -> geometry: the fake depth grows left to right, so the right edge is farther.
+    co = np.empty(len(obj.data.vertices) * 3, np.float32)
+    obj.data.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    left = co[co[:, 0] < np.percentile(co[:, 0], 5)]
+    right = co[co[:, 0] > np.percentile(co[:, 0], 95)]
+    assert -right[:, 2].mean() > -left[:, 2].mean()
+
+    # Same settings: nothing is re-run.
+    n_calls = calls.count("\n")
+    assert bpy.ops.depth_scene.generate_depth() == {"FINISHED"}
+    calls = open(os.path.join(bpy.path.abspath(s.save_location), "marigold_v2", "corridor", "out_depth",
+                              "calls.txt")).read()
+    assert calls.count("\n") == n_calls
+
+    # A failing run (e.g. CUDA out of memory) is reported, nothing is half-imported.
+    monkeypatch.setenv("FAKE_MV2_FAIL", "normals")
+    s.v2_seed = 4
+    token = o.normal_map["depth_scene_token"]
+    with pytest.raises(RuntimeError, match="normals failed .exit 1.*out of memory"):
+        bpy.ops.depth_scene.generate_passes()
+    assert o.normal_map["depth_scene_token"] == token
+    log = open(os.path.join(bpy.path.abspath(s.save_location), "marigold_v2", "corridor", "marigold_v2.log")).read()
+    assert "out of memory" in log
+    s.backend = "V1"
+    s.pass_normals = s.pass_albedo_v2 = False
+
+
 class _Layout:
     """Fake UILayout that validates property names and operator ids."""
 
@@ -429,6 +495,9 @@ class _Layout:
     def label(self, **kw):
         pass
 
+    def separator(self, **kw):
+        pass
+
     def __setattr__(self, key, value):
         object.__setattr__(self, key, value)
 
@@ -449,10 +518,17 @@ def test_panels_draw_without_errors(addon):
             if hasattr(cls, "poll"):
                 assert cls.poll(bpy.context)
             cls.draw(fake, bpy.context)
-    for use_existing in (False, True):
-        bpy.context.scene.depth_scene.use_existing_depth = use_existing
-        ui.DEPTHSCENE_PT_main.draw(type("P", (), {"layout": _Layout()})(), bpy.context)
+    s = bpy.context.scene.depth_scene
+    for backend in ("V1", "V2"):
+        s.backend = backend
+        s.pass_normals = s.pass_albedo_v2 = backend == "V2"
+        for use_existing in (False, True):
+            s.use_existing_depth = use_existing
+            ui.DEPTHSCENE_PT_main.draw(type("P", (), {"layout": _Layout()})(), bpy.context)
+    s.backend = "V1"
+    s.pass_normals = s.pass_albedo_v2 = False
     prefs = bpy.context.preferences.addons["depth_scene"].preferences
     preferences.DepthScenePreferences.draw(type("P", (), {
         "layout": _Layout(), "ort_variant": prefs.ort_variant, "models_dir": prefs.models_dir,
+        "v2_python": prefs.v2_python, "v2_repo": prefs.v2_repo, "v2_assets": prefs.v2_assets,
         "bl_rna": prefs.bl_rna})(), bpy.context)

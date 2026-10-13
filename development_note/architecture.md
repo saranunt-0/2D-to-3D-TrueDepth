@@ -23,6 +23,10 @@
   roughness MapRange; metallic Math; NormalMap (OBJECT space = projector camera frame)
   -> Bump; residual -> Emission; optional MixShader to unlit image (Original Lighting).
   Rebuilt on every property change (managed material).
+- **Marigold V2 backend** (`v2_job.V2Job`, `ai/marigold_v2.py`): external process running the
+  user's marigold-v2 `scripts/infer.py` per modality (depth / normals / albedo); outputs (.npy)
+  converted and saved as the same EXR maps; depth kind `log_depth` -> LOG mapping. Modal
+  operator `depth_scene.marigold_v2` keeps Blender responsive.
 
 ## Blender objects per build
 `<name> Rig` (empty, rot X +90 deg, at 3D cursor)

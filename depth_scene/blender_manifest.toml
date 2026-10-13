@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "depth_scene"
-version = "0.2.0"
+version = "0.3.0"
 name = "Depth Scene (Marigold)"
 tagline = "Image to 3D scene with Marigold depth, normals and materials"
 maintainer = "saranunt-0"
@@ -16,7 +16,7 @@ license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
 network = "Download depth models and install ONNX Runtime"
-files = "Read images, write depth maps and models"
+files = "Read images, write depth maps and models, run your own Marigold V2 install"
 
 [build]
 paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

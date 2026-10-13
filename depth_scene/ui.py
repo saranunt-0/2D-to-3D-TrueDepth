@@ -2,8 +2,8 @@
 
 import bpy
 
-from . import builder, paths
-from .ai import marigold, models, runtime
+from . import builder, paths, v2_job
+from .ai import marigold, marigold_v2, models, runtime
 from .operators import _active_depth_object
 from .properties import KIND_ITEMS
 
@@ -19,6 +19,32 @@ def _missing_model_warning(layout, info, precision):
         col.label(text=f"Convert with tools/export_marigold_onnx.py --task {info.export_task}")
         return True
     return False
+
+
+def _draw_v2_depth(box, s):
+    """Marigold V2 (external) settings + setup status."""
+    python, repo, assets = v2_job.settings_from_prefs()
+    modalities = ["depth"] + builder.enabled_v2_passes(s)
+    problems = marigold_v2.check_setup(python, repo, assets, modalities=modalities, depth_checkpoint=s.v2_checkpoint)
+    if problems:
+        col = box.column(align=True)
+        col.alert = True
+        col.label(text=problems[0], icon="ERROR")
+        col.label(text="Set it up in Preferences > Add-ons > Depth Scene (see README)")
+    col = box.column(align=True)
+    col.prop(s, "v2_checkpoint")
+    col.prop(s, "v2_resolution")
+    col.prop(s, "v2_seed")
+    col = box.column(align=True)
+    col.label(text="Separate process on a CUDA GPU: ~17 GB VRAM at 1024 px.", icon="INFO")
+    col.label(text="Each run reloads the 20 B backbone (minutes). Apache-2.0.")
+    box.prop(s, "save_location")
+    job = v2_job.ACTIVE.get("job")
+    if job is not None:
+        box.label(text=job.status or "Marigold V2 running...", icon="SORTTIME")
+        box.label(text="Esc in the 3D Viewport cancels")
+    else:
+        box.operator("depth_scene.generate_depth", text="Generate Depth (Marigold V2)", icon="SHADERFX")
 
 
 class _Base:
@@ -44,7 +70,11 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
         if s.use_existing_depth:
             box.template_ID(s, "existing_depth", open="image.open")
             box.prop(s, "existing_kind")
+        elif s.backend == "V2":
+            box.prop(s, "backend", text="")
+            _draw_v2_depth(box, s)
         else:
+            box.prop(s, "backend", text="")
             box.prop(s, "model")
             info = models.get(s.model)
             _missing_model_warning(box, info, s.precision)
@@ -61,23 +91,30 @@ class DEPTHSCENE_PT_main(_Base, bpy.types.Panel):
             if runtime.import_ort() is None:
                 box.label(text="Install ONNX Runtime in Preferences > Add-ons", icon="ERROR")
             box.operator("depth_scene.generate_depth", icon="SHADERFX")
-            if s.existing_depth is not None:
-                box.label(text=f"Last depth: {s.existing_depth.name} ({KIND_LABELS.get(s.existing_kind, '')})",
-                          icon="CHECKMARK")
+        if not s.use_existing_depth and s.existing_depth is not None:
+            box.label(text=f"Last depth: {s.existing_depth.name} ({KIND_LABELS.get(s.existing_kind, '')})",
+                      icon="CHECKMARK")
 
         box = layout.box()
         box.label(text="3. Material Passes (optional)", icon="MATERIAL")
         col = box.column(align=True)
+        v2 = s.backend == "V2"
+        if v2:
+            col.prop(s, "pass_normals", text="Normal Map (Marigold V2)")
+            col.prop(s, "pass_albedo_v2")
+            col.separator()
         for group, prop in PASS_PROPS:
-            col.prop(s, prop)
+            if v2 and group == "normals":
+                continue
+            col.prop(s, prop, text=f"{s.bl_rna.properties[prop].name}{' (v1.1 ONNX)' if v2 else ''}")
             if getattr(s, prop):
                 _missing_model_warning(col, models.get(models.PASS_MODELS[group]), s.precision)
-        if s.pass_appearance and s.pass_lighting:
+        if sum((s.pass_appearance, s.pass_lighting, v2 and s.pass_albedo_v2)) > 1:
             box.prop(s, "albedo_from")
-        if builder.enabled_pass_groups(s):
+        if builder.enabled_pass_groups(s) or builder.enabled_v2_passes(s):
             col = box.column(align=True)
-            col.label(text="Uses the depth settings above (resolution, steps,", icon="INFO")
-            col.label(text="ensemble, seed); each pass ~ one depth run. Build runs them too.")
+            col.label(text="Uses the depth settings above (resolution, seed...);", icon="INFO")
+            col.label(text="each pass ~ one depth run. Build runs them too.")
             box.operator("depth_scene.generate_passes", text="Generate for Active Object", icon="NODE_MATERIAL")
 
         box = layout.box()

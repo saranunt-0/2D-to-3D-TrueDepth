@@ -250,3 +250,18 @@ def test_intrinsics_to_maps_converts_srgb_albedo_and_renames():
     assert np.allclose(maps["albedo"], imaging.srgb_to_linear(alb))
     assert maps["roughness"].max() == 1.0                     # clipped to [0, 1]
     assert info == {}
+
+
+# ---------------------------------------------------------------- Marigold V2 log depth
+
+def test_log_mapping_inverts_affine_log_depth():
+    """Log depth d = a*log z + b, min/max normalised: LOG mapping with the true near/far is exact."""
+    z = np.geomspace(1.5, 24.0, 50).astype(np.float32)
+    d = 0.37 * np.log(z) - 1.1                                  # unknown scale and shift
+    t = dm.nearness(d, "log_depth")
+    assert t[0] == pytest.approx(1.0) and t[-1] == pytest.approx(0.0)
+    out = dm.map_to_distance(t, "LOG", 1.5, 24.0)
+    assert np.allclose(out, z, rtol=1e-4)
+    assert dm.default_mapping("log_depth") == "LOG"
+    lin = dm.map_to_distance(t, "LINEAR", 1.5, 24.0)            # the wrong mapping bends the geometry
+    assert np.abs(lin - z).max() > 3.0

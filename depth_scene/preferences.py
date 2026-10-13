@@ -10,7 +10,7 @@ import bpy
 from bpy.props import EnumProperty, StringProperty
 
 from . import paths
-from .ai import marigold, models, runtime
+from .ai import marigold, marigold_v2, models, runtime
 
 ORT_VARIANTS = [
     ("cpu", "CPU (all platforms)", "onnxruntime - CPU everywhere, CoreML GPU on macOS", 0),
@@ -128,6 +128,13 @@ class DepthScenePreferences(bpy.types.AddonPreferences):
                               update=lambda self, ctx: activate_site_packages())
     models_dir: StringProperty(name="Models Folder", subtype="DIR_PATH",
                                description="Where model files are stored (empty = add-on user folder)")
+    v2_python: StringProperty(name="Python", subtype="FILE_PATH",
+                              description="Python executable of the marigold-v2 environment "
+                                          "(e.g. ~/miniconda3/envs/marigold-v2/bin/python)")
+    v2_repo: StringProperty(name="Repository", subtype="DIR_PATH",
+                            description="Clone of github.com/huawei-bayerlab/marigold-v2")
+    v2_assets: StringProperty(name="Assets Folder", subtype="DIR_PATH",
+                              description="DEPTH_ASSETS_DIR with checkpoints/ (empty = <repository>/assets)")
 
     def draw(self, context):
         layout = self.layout
@@ -166,6 +173,24 @@ class DepthScenePreferences(bpy.types.AddonPreferences):
         col.label(text="but use-based restrictions apply and must be passed on if you redistribute.")
         col.label(text="Convert each prs-eth/marigold-*-v1-1 checkpoint with tools/export_marigold_onnx.py "
                        "--task depth|normals|iid-appearance|iid-lighting (see README).")
+
+        box = layout.box()
+        box.label(text="Marigold V2 (external, CUDA GPU with 17+ GB)", icon="CONSOLE")
+        box.prop(self, "v2_python")
+        box.prop(self, "v2_repo")
+        box.prop(self, "v2_assets")
+        problems = marigold_v2.check_setup(bpy.path.abspath(self.v2_python), bpy.path.abspath(self.v2_repo),
+                                           bpy.path.abspath(self.v2_assets), modalities=marigold_v2.MODALITIES)
+        col = box.column(align=True)
+        if problems:
+            for msg in problems:
+                col.label(text=msg, icon="ERROR")
+        else:
+            col.label(text="Files found (GPU and packages are only checked when it runs)", icon="CHECKMARK")
+        col = box.column(align=True)
+        col.label(text=f"Setup: git clone {marigold_v2.REPO_URL}; bash setup/setup_env.sh;", icon="INFO")
+        col.label(text="python scripts/download_assets.py --skip-datasets (Linux, CUDA). See README.")
+        col.label(text=f"Licence: {marigold_v2.LICENSE_ID}")
 
 
 classes = (DEPTHSCENE_OT_install_ort, DEPTHSCENE_OT_delete_model, DepthScenePreferences)

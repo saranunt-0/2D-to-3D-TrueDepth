@@ -122,6 +122,23 @@ def write_map(name, arr, folder, non_color):
     return _write_exr(name, rgba, folder, non_color)
 
 
+def write_png(rgb, path):
+    """Save display-referred RGB [0, 1] (h, w, 3) as an 8-bit sRGB PNG (input for external tools)."""
+    rgb = np.clip(np.asarray(rgb, np.float32)[..., :3], 0.0, 1.0)
+    h, w = rgb.shape[:2]
+    tmp = bpy.data.images.new("depth_scene_export_tmp", w, h, alpha=False)
+    try:
+        px = np.ones((h, w, 4), np.float32)
+        px[..., :3] = rgb
+        tmp.pixels.foreach_set(px[::-1].ravel())
+        tmp.filepath_raw = path
+        tmp.file_format = "PNG"
+        tmp.save()
+    finally:
+        bpy.data.images.remove(tmp)
+    return path
+
+
 def depth_arrays(img):
     """(depth (h, w), valid (h, w) bool or None) from a depth Image."""
     arr = to_array(img)

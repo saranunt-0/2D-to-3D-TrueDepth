@@ -19,8 +19,15 @@ RIG_ROTATION = (math.pi / 2, 0.0, 0.0)   # camera space (-Z forward) -> world (+
 
 def depth_signature(s, image, model_key=None):
     """Identifies a generated map: reused while image + model settings are unchanged."""
+    if model_key is None and s.backend == "V2":
+        return v2_signature(s, image, "depth")
     return (f"{image.name_full}|{model_key or s.model}|{s.precision}|{s.input_size}|{s.denoise_steps}|"
             f"{s.ensemble_size}|{s.seed}")
+
+
+def v2_signature(s, image, modality):
+    ckpt = s.v2_checkpoint if modality == "depth" else modality
+    return f"{image.name_full}|marigold-v2:{ckpt}|{s.v2_resolution}|{s.v2_seed}"
 
 
 def generate_depth(scene_settings, image, progress=None):
@@ -50,7 +57,22 @@ NON_COLOR_PASSES = {"normal", "roughness", "metallic", "shading"}
 
 
 def enabled_pass_groups(s):
-    return [g for g in PASS_GROUPS if getattr(s, f"pass_{g}")]
+    """Material-pass groups run with the in-Blender (v1.1 ONNX) models.
+
+    With the Marigold V2 backend the normals come from V2 (``enabled_v2_passes``);
+    IID-Appearance / IID-Lighting have no V2 counterpart and still run as v1.1.
+    """
+    groups = [g for g in PASS_GROUPS if getattr(s, f"pass_{g}")]
+    if s.backend == "V2":
+        groups = [g for g in groups if g != "normals"]
+    return groups
+
+
+def enabled_v2_passes(s):
+    """Marigold V2 modalities to run besides depth (V2 backend only)."""
+    if s.backend != "V2":
+        return []
+    return [m for m, on in (("normals", s.pass_normals), ("albedo", s.pass_albedo_v2)) if on]
 
 
 def pass_image_name(image, group, pass_name):
@@ -123,9 +145,11 @@ def assign_passes(obj, results, albedo_from="APPEARANCE"):
     if "lighting" in results:
         o.shading_map = results["lighting"]["shading"]
         o.residual_map = results["lighting"]["residual"]
-    albedos = {g: results[g]["albedo"] for g in ("appearance", "lighting") if g in results}
+    albedos = {g: results[g]["albedo"] for g in ("appearance", "lighting", "v2") if "albedo" in results.get(g, {})}
+    if "v2" in results and "normal" in results["v2"]:
+        o.normal_map = results["v2"]["normal"]
     if albedos:
-        pref = "lighting" if albedo_from == "LIGHTING" else "appearance"
+        pref = {"LIGHTING": "lighting", "V2": "v2"}.get(albedo_from, "appearance")
         current = o.albedo_map.get("depth_scene_pass_group") if o.albedo_map is not None else None
         if pref in albedos:
             o.albedo_map = albedos[pref]

@@ -7,7 +7,7 @@ Inspired by the TrueDepth add-on workflow; not affiliated with it.
 bl_info = {
     "name": "Depth Scene (Marigold)",
     "author": "saranunt-0",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Depth Scene",
     "description": "Marigold AI depth, normals and materials: image-to-3D scene reconstruction",

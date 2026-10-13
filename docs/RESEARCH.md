@@ -168,6 +168,90 @@ map toggleable and adjustable.
   byte-identical VAEs (expected, since Marigold freezes the VAE, but not
   checked).
 
+### 0.6 Marigold V2 as an external backend (2026-10-13)
+
+**What it is [fact, repo README + code at commit 9926d93]:** Marigold V2
+(Pavlovic, Wandel, Obukhov et al., ACM TOG / SIGGRAPH Asia 2026,
+arXiv 2609.08084).
+
+* **Architecture:** LoRA adapters (and, for some checkpoints, a fine-tuned
+  VAE decoder) on the frozen Qwen-Image-Edit-2509 DiT. It makes one
+  rectified-flow step at a fixed t = 0.499. Precomputed prompt embeddings
+  replace the 7 B text encoder.
+* **Loading:** the DiT is quantised to 4-bit NF4 with bitsandbytes each time
+  it loads.
+* **Requirements:** Linux, Python 3.10, a CUDA GPU; 17 GB VRAM at 1024² and
+  29 GB at 2048². No ONNX export; diffusers integration is still open on
+  their checklist.
+* **Checkpoints:**
+  * depth: `Log-stage2` (default), `Log-stage1`, `Log-layered`
+    (see-through), `Uniform-base`, `Disparity-base`, `Disparity-layered`,
+    `Uniform-layered`;
+  * `normals`;
+  * `albedo` (linear).
+* **Licence:** code and models Apache-2.0 (`LICENSE`, `NOTICE`). The
+  Qwen-Image-Edit-2509 backbone is Apache-2.0 [strong: Hugging Face licence
+  tag via search; the card itself was not opened].
+
+**Why external [inference]:** a 20 B DiT with bitsandbytes 4-bit
+quantisation cannot be exported to ONNX Runtime in a way that runs inside
+Blender's Python. At ~10 GB in 4-bit, CPU inference would be impractical
+anyway. The stable interface is the repo's own CLI, `scripts/infer.py`.
+
+**Output contract [fact, `scripts/infer.py` + `marigoldv2/validation/folder_steps.py`]:**
+
+* Files go to `OUT/images/predictions_npy/<stem>.npy`.
+* **Depth** `[H,W]` is the channel mean of the decoded image. It is not
+  clipped; training depth is normalised to [−1, 1] (`QwenDepthEncode`).
+* **Normals** `[3,H,W]` are renormalised to unit length, with zero vectors
+  where invalid. They use the V1.1 camera frame (`ReadSurfaceNormalsNpy`
+  reads "camera-space normals (Marigold V1.1 format)"; horizontal flips
+  negate x).
+* **Albedo** `[3,H,W]` is `clamp_min(0) ** (1/2.2)` of the linear
+  prediction, because `infer.py` requests the "srgb" output space.
+* **Resolution:** at native resolution, predictions are resized back to the
+  input size. With `--width/--height` they stay at that size.
+* Every `infer.py` call spawns `evaluation.depth.evaluate_pipeline`, which
+  loads and quantises the backbone again.
+
+**Add-on design:**
+
+* The backend is selectable; v1.1 stays the in-Blender default. V2
+  produces depth, normals and albedo; v1.1 IID still supplies
+  roughness / metallic / shading.
+* `ai/marigold_v2.py` (pure): command line, child environment (strip
+  PYTHONHOME / PYTHONPATH that Blender may set), output paths, conversions
+  (depth `(clip(x,−1,1)+1)/2`, normals renormalised, albedo `x^2.2`),
+  inference size (aspect kept, multiples of 16), setup check.
+* `v2_job.py`: one subprocess per modality, sequential, with a stdout reader
+  thread. A modal operator polls it on a 0.5 s timer (progress bar, status
+  text, Esc cancels); scripts and tests use a blocking path. Results are
+  saved as EXR with signatures, so unchanged settings reuse them.
+* New depth kind `log_depth` with **LOG** mapping
+  `z = near^t · far^(1−t)`. This is exact for affine log depth:
+  `log z = a·d + b`, normalised d. A unit test recovers z to 1e-4, where
+  LINEAR is off by >3 m on the same data.
+
+**Validation [measured, without the real model]:**
+
+* A fake `infer.py` (same CLI, asset checks and output layout, known values)
+  drives the whole path. Unit tests cover the command line, environment,
+  setup check, conversions and failure exit codes.
+* The Blender test (4.2.23 and 5.2.2) covers:
+  * Build → V2 depth + normals + albedo → LOG-mapped mesh;
+  * pass values (linear albedo 0.5; normal (0.6, 0, 0.8) encoded);
+  * reuse without new calls;
+  * an out-of-memory failure reported with the log;
+  * a missing-setup error.
+
+**Unverified:**
+
+- [ ] A real run (no GPU, no 20 B weights in the sandbox): load time, VRAM
+  and the exact numeric range of real depth outputs (clipping at ±1
+  assumed from training normalisation).
+- [ ] Windows / WSL. The repo targets Linux; the add-on passes
+  `CREATE_NO_WINDOW` on Windows, but this is untested.
+
 ## 1. Requirements
 
 1. Runs **inside Blender's bundled Python**, which has NumPy but no
@@ -372,7 +456,7 @@ All on Blender **4.2.23 LTS** (Python 3.11, NumPy 1.26) and **5.2.2 LTS**
 
 - Marigold code, licences, news: https://github.com/prs-eth/Marigold · weights: https://huggingface.co/prs-eth/marigold-depth-v1-1 · paper: https://arxiv.org/abs/2312.02145
 - diffusers Marigold pipeline (source read for the port): https://github.com/huggingface/diffusers/tree/main/src/diffusers/pipelines/marigold
-- Marigold V2 (Huawei, different model): https://github.com/huawei-bayerlab/marigold-v2
+- Marigold V2 (Huawei Bayer Lab; code, checkpoints table, CLI, licence): https://github.com/huawei-bayerlab/marigold-v2 · weights: https://huggingface.co/huawei-bayerlab/marigold-v2-0 · paper: https://arxiv.org/abs/2609.08084 · backbone: https://huggingface.co/Qwen/Qwen-Image-Edit-2509
 - Marigold normals / IID checkpoints: https://huggingface.co/prs-eth/marigold-normals-v1-1 · https://huggingface.co/prs-eth/marigold-iid-appearance-v1-1 · https://huggingface.co/prs-eth/marigold-iid-lighting-v1-1 · IID target configs: https://github.com/prs-eth/Marigold/tree/main/config
 
 - Depth Anything V2 README (params, licence, input size 518): https://github.com/DepthAnything/Depth-Anything-V2

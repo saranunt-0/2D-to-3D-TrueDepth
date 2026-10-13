@@ -144,7 +144,7 @@ def build(params, depth_map, depth_kind, image_size, gray=None, alpha=None, vali
     """Build mesh arrays.
 
     depth_map   (h, w) raw model output (any resolution).
-    depth_kind  'disparity' | 'depth' | 'metric'.
+    depth_kind  'disparity' | 'depth' | 'log_depth' | 'metric'.
     image_size  (width_px, height_px) of the colour image; sets aspect + FOV.
     gray        optional (H, W) luminance for detail displacement.
     alpha       optional (H, W) image alpha (faces below 0.5 are removed).

@@ -6,7 +6,7 @@ import bpy
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
                        PointerProperty, StringProperty)
 
-from .ai import models
+from .ai import marigold_v2, models
 
 MODEL_ITEMS = [(m.key, m.label, m.description) for m in models.DEPTH_MODELS.values()]
 
@@ -16,12 +16,14 @@ MODE_ITEMS = [
 ]
 KIND_ITEMS = [
     ("disparity", "White = Near", "Relative inverse depth (most AI depth maps from other tools)"),
-    ("depth", "White = Far", "Relative depth (Marigold output, z-buffer style maps)"),
+    ("depth", "White = Far", "Relative depth (Marigold v1.1 output, z-buffer style maps)"),
+    ("log_depth", "Log Depth (White = Far)", "Relative log depth (Marigold V2 default output)"),
     ("metric", "Metric (metres)", "Absolute planar depth, e.g. EXR from a renderer"),
 ]
 MAPPING_ITEMS = [
     ("INVERSE", "Inverse", "1/z interpolated between near and far - correct for disparity maps"),
     ("LINEAR", "Linear", "z interpolated between near and far - correct for 'white = far' maps"),
+    ("LOG", "Logarithmic", "log z interpolated between near and far - correct for Marigold V2 log depth"),
     ("METRIC", "Metric", "Use metric depth directly (metric EXR)"),
 ]
 SHADING_ITEMS = [
@@ -37,7 +39,14 @@ NORMAL_SPACE_ITEMS = [
 ALBEDO_FROM_ITEMS = [
     ("APPEARANCE", "Appearance", "Albedo from IID-Appearance (sRGB-trained, pairs with roughness/metallic)"),
     ("LIGHTING", "Lighting", "Albedo from IID-Lighting (linear, consistent with its shading/highlights)"),
+    ("V2", "Marigold V2", "Albedo from Marigold V2 (external backend)"),
 ]
+BACKEND_ITEMS = [
+    ("V1", "Marigold v1.1 (in Blender)", "ONNX Runtime inside Blender, CPU or GPU; convert the models once"),
+    ("V2", "Marigold V2 (external GPU)", "Runs your marigold-v2 install as a separate process "
+                                         "(Linux, CUDA GPU with 17+ GB); sharper, Apache-2.0"),
+]
+V2_CHECKPOINT_ITEMS = [(k, v[1], v[2]) for k, v in marigold_v2.DEPTH_CHECKPOINTS.items()]
 
 
 def _rebuild(self, context):
@@ -68,6 +77,7 @@ class DepthSceneSettings(bpy.types.PropertyGroup):
     """Generation settings, stored on the Scene."""
 
     image: PointerProperty(name="Image", type=bpy.types.Image)
+    backend: EnumProperty(name="Backend", items=BACKEND_ITEMS, default="V1")
     model: EnumProperty(name="Model", items=MODEL_ITEMS, default=0)
     device: EnumProperty(name="Device", items=[
         ("AUTO", "Auto", "GPU if available, else CPU"),
@@ -87,6 +97,14 @@ class DepthSceneSettings(bpy.types.PropertyGroup):
                                            "Smoother, more reliable, but N times slower")
     seed: IntProperty(name="Seed", default=0, min=0,
                       description="Noise seed - same seed + settings = same depth map")
+    # ---- Marigold V2 (external backend)
+    v2_checkpoint: EnumProperty(name="Depth Checkpoint", items=V2_CHECKPOINT_ITEMS,
+                                default=marigold_v2.DEFAULT_DEPTH_CHECKPOINT)
+    v2_resolution: IntProperty(name="Inference Resolution", default=1024, min=0, soft_max=2048, max=4096, step=16,
+                               description="Longer side for Marigold V2 (multiple of 16; 0 = native image size). "
+                                           "~17 GB VRAM at 1024 px, ~29 GB at 2048 px")
+    v2_seed: IntProperty(name="Seed", default=2025, min=0,
+                         description="Seed of the VAE encoder sampling (Marigold V2 default 2025)")
     # ---- material passes (extra Marigold models; same resolution / steps / ensemble / seed)
     pass_normals: BoolProperty(name="Normal Map", default=False,
                                description="Marigold Normals: per-pixel surface normals so lights shade "
@@ -98,8 +116,10 @@ class DepthSceneSettings(bpy.types.PropertyGroup):
                                 description="Marigold IID-Lighting: albedo, the painted diffuse shading and "
                                             "the non-diffuse residual (highlights, glows), calibrated so "
                                             "image = albedo x shading + residual")
+    pass_albedo_v2: BoolProperty(name="Albedo (Marigold V2)", default=False,
+                                 description="Marigold V2 albedo (de-lit colour), Marigold V2 backend only")
     albedo_from: EnumProperty(name="Albedo From", items=ALBEDO_FROM_ITEMS, default="APPEARANCE",
-                              description="Which model's albedo the material uses when both passes are generated")
+                              description="Which model's albedo the material uses when several are generated")
     use_existing_depth: BoolProperty(name="Use Existing Depth Map", default=False)
     existing_depth: PointerProperty(name="Depth Map", type=bpy.types.Image)
     existing_kind: EnumProperty(name="Depth Map Type", items=KIND_ITEMS, default="disparity")
