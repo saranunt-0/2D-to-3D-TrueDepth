@@ -243,6 +243,17 @@ Added at the user's request as an optional, manually converted model.
 * **Weights** are a PyTorch Lightning checkpoint on Google Drive (no ONNX
   release, no Hugging Face mirror). They were unreachable from the
   development sandbox, so the checkpoint-loading step is **unverified**.
+* **Export dry run** [measured; real architecture, random weights, torch 2.8,
+  4-core CPU]:
+  * 647.7 M parameters; fp32 ONNX is a 1 MB graph plus a 2.58 GB `.data`
+    file; export takes ~2 min.
+  * ONNX Runtime vs PyTorch: per-pixel relative error p99 1.2e-7. CPU time
+    is ~65 s in PyTorch and ~75 s in ORT per 1536² image.
+  * fp16 (1.29 GB) needed two fixes in the converter path. Shape inference
+    must run from the file path because the model is over 2 GB. The 96
+    shape-derived `Cast` nodes must target float16.
+  * After those fixes fp16 matches fp32 (rank correlation 1.0) but is no
+    faster on CPU and peaks at 9.9 GB RSS, so treat it as GPU-only.
 
 ## 3. Reconstruction maths
 
